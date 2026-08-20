@@ -677,6 +677,24 @@ const Audio7 = {
    Same seed -> same pixels, so a skin always looks like itself.
    ============================================================ */
 
+/* One noise tile, generated once, composited instead of walking every
+   pixel with getImageData. Same look, ~40x cheaper. */
+let _noiseTile = null;
+function noiseTile(){
+  if(_noiseTile) return _noiseTile;
+  const S=256, cv=document.createElement('canvas'); cv.width=cv.height=S;
+  const c=cv.getContext('2d');
+  const img=c.createImageData(S,S), d=img.data;
+  const r=mulberry32(0x51F3A1);
+  for(let i=0;i<d.length;i+=4){
+    const v=128+(r()-0.5)*255;
+    const q=v<0?0:(v>255?255:v);
+    d[i]=d[i+1]=d[i+2]=q; d[i+3]=255;
+  }
+  c.putImageData(img,0,0);
+  _noiseTile=cv; return cv;
+}
+
 class Painter {
   constructor(ctx, w, h, part, wear, rnd){
     this.c = ctx; this.w = w; this.h = h;
@@ -698,14 +716,19 @@ class Painter {
     c.fillStyle=g; c.fillRect(0,0,this.w,this.h); return this;
   }
   /* ---- surface texture ------------------------------------ */
-  grain(amount=0.06, size=1){
-    const c=this.c, w=this.w,h=this.h;
-    const img=c.getImageData(0,0,w,h), d=img.data;
-    for(let i=0;i<d.length;i+=4){
-      const n=(this.rnd()-0.5)*255*amount;
-      d[i]=clamp(d[i]+n,0,255); d[i+1]=clamp(d[i+1]+n,0,255); d[i+2]=clamp(d[i+2]+n,0,255);
-    }
-    c.putImageData(img,0,0); return this;
+  grain(amount=0.06){
+    const c=this.c, t=noiseTile();
+    const ox=-Math.floor(this.rnd()*128), oy=-Math.floor(this.rnd()*128);
+    c.save();
+    c.globalCompositeOperation='overlay';
+    c.globalAlpha=clamp(amount*3.4,0,1);
+    for(let y=oy;y<this.h;y+=256) for(let x=ox;x<this.w;x+=256) c.drawImage(t,x,y);
+    /* a whisper of additive so grain still reads on near-black bases */
+    c.globalCompositeOperation='lighter';
+    c.globalAlpha=clamp(amount*0.55,0,1);
+    for(let y=oy;y<this.h;y+=256) for(let x=ox;x<this.w;x+=256) c.drawImage(t,x,y);
+    c.restore();
+    return this;
   }
   brushed(strength=0.10, vertical=false){
     const c=this.c; c.save(); c.globalAlpha=strength;
@@ -879,6 +902,262 @@ class Painter {
     const c=this.c; const prev=c.globalCompositeOperation;
     c.globalCompositeOperation=mode; fn(this); c.globalCompositeOperation=prev; return this;
   }
+
+  /* ==================================================================
+     Generators added from the VALORANT / Roblox-shooter study.
+     Rules baked in here:
+       · pattern scale is BIG — a killcam thumbnail must still read it
+       · metal is PAINTED (hard horizon + blown streaks), not shaded
+       · one gradient per skin, spanning the whole part
+       · dark base + ONE saturated accent
+     ================================================================== */
+
+  /* full-length fade — 2-3 stops, the whole part, no fussy midtones */
+  fade(cols, ang=0.35, hard=false){
+    const c=this.c, r=Math.max(this.w,this.h);
+    const x0=this.w/2 - Math.cos(ang)*r/2, y0=this.h/2 - Math.sin(ang)*r/2;
+    const g=c.createLinearGradient(x0,y0,this.w-x0,this.h-y0);
+    const n=cols.length-1;
+    cols.forEach((col,i)=>{
+      if(hard && i>0) g.addColorStop(i/n-0.001, cols[i-1]);
+      g.addColorStop(i/n, col);
+    });
+    c.fillStyle=g; c.fillRect(0,0,this.w,this.h); return this;
+  }
+
+  /* painted chrome: hard sky/ground horizon + blown specular streaks.
+     This is how Roblox shooters fake metal, and it survives downscaling
+     where real specular does not. */
+  chrome(sky, ground, streak='#ffffff', horizon=0.46, streaks=2){
+    const c=this.c;
+    const g=c.createLinearGradient(0,0,0,this.h);
+    g.addColorStop(0, sky);
+    g.addColorStop(horizon-0.02, shade(sky,-0.06));
+    g.addColorStop(horizon, ground);
+    g.addColorStop(1, shade(ground,0.14));
+    c.fillStyle=g; c.fillRect(0,0,this.w,this.h);
+    c.save();
+    for(let i=0;i<streaks;i++){
+      const y=this.h*(0.14+this.rnd()*0.72), hh=this.h*(0.018+this.rnd()*0.045);
+      const sg=c.createLinearGradient(0,y,this.w,y);
+      sg.addColorStop(0,'rgba(255,255,255,0)');
+      sg.addColorStop(0.35,streak); sg.addColorStop(0.62,streak);
+      sg.addColorStop(1,'rgba(255,255,255,0)');
+      c.globalAlpha=0.40+this.rnd()*0.32; c.fillStyle=sg; c.fillRect(0,y,this.w,hh);
+    }
+    c.restore(); c.globalAlpha=1; return this;
+  }
+
+  /* case-hardened — low-frequency blobs thresholded into hard bands */
+  caseHardened(cols, blobs=16){
+    const c=this.c;
+    c.fillStyle=cols[0]; c.fillRect(0,0,this.w,this.h);
+    for(let i=0;i<blobs;i++){
+      c.fillStyle=cols[1+Math.floor(this.rnd()*(cols.length-1))];
+      const cx=this.rnd()*this.w, cy=this.rnd()*this.h, r=this.w*(0.10+this.rnd()*0.22);
+      c.beginPath();
+      const pts=9;
+      for(let k=0;k<=pts;k++){
+        const a=k/pts*TAU, rr=r*(0.5+this.rnd()*0.9);
+        k? c.lineTo(cx+Math.cos(a)*rr, cy+Math.sin(a)*rr)
+         : c.moveTo(cx+Math.cos(a)*rr, cy+Math.sin(a)*rr);
+      }
+      c.closePath(); c.fill();
+    }
+    return this;
+  }
+
+  /* galaxy / starfield — the single highest-value pattern in Sniper Arena */
+  galaxy(neb=['#5b1fa8','#1f4ba8','#a81f7b'], stars=260){
+    const c=this.c;
+    this.radial('#160c2a','#03030a',0.5,0.5,0.85);
+    c.save(); c.globalCompositeOperation='screen';
+    for(let i=0;i<9;i++){
+      const col=neb[Math.floor(this.rnd()*neb.length)];
+      const cx=this.rnd()*this.w, cy=this.rnd()*this.h, r=this.w*(0.16+this.rnd()*0.34);
+      const g=c.createRadialGradient(cx,cy,0,cx,cy,r);
+      g.addColorStop(0,col); g.addColorStop(0.45,col+'55'); g.addColorStop(1,'rgba(0,0,0,0)');
+      c.globalAlpha=0.30+this.rnd()*0.35; c.fillStyle=g;
+      c.beginPath(); c.arc(cx,cy,r,0,TAU); c.fill();
+    }
+    c.restore(); c.globalAlpha=1;
+    for(let i=0;i<stars;i++){
+      const m=Math.pow(this.rnd(),3);                 // power-law sizes
+      const r=0.35+m*2.4;
+      c.fillStyle=`rgba(255,255,255,${0.30+this.rnd()*0.7})`;
+      c.beginPath(); c.arc(this.rnd()*this.w,this.rnd()*this.h,r,0,TAU); c.fill();
+      if(m>0.8){                                       // a few with flare spikes
+        c.strokeStyle='rgba(255,255,255,0.5)'; c.lineWidth=0.8;
+        const x=this.rnd()*this.w,y=this.rnd()*this.h,L=r*4;
+        c.beginPath(); c.moveTo(x-L,y); c.lineTo(x+L,y); c.moveTo(x,y-L); c.lineTo(x,y+L); c.stroke();
+      }
+    }
+    return this;
+  }
+
+  /* faceted gem — jittered grid quads, hard edges, one white highlight */
+  facets(cols, n=7, highlight='rgba(255,255,255,0.85)'){
+    const c=this.c;
+    const cw=this.w/n, ch=this.h/n;
+    const jit=()=>(this.rnd()-0.5)*cw*0.55;
+    const P=[];
+    for(let y=0;y<=n;y++){ P[y]=[]; for(let x=0;x<=n;x++)
+      P[y][x]=[x*cw+(x&&x<n?jit():0), y*ch+(y&&y<n?jit():0)]; }
+    for(let y=0;y<n;y++) for(let x=0;x<n;x++){
+      const q=[P[y][x],P[y][x+1],P[y+1][x+1],P[y+1][x]];
+      [[0,1,2],[0,2,3]].forEach((tri,ti)=>{
+        c.fillStyle=cols[Math.floor(this.rnd()*cols.length)];
+        c.beginPath();
+        tri.forEach((k,i)=> i? c.lineTo(q[k][0],q[k][1]) : c.moveTo(q[k][0],q[k][1]));
+        c.closePath(); c.fill();
+        if(this.rnd()<0.13){
+          c.fillStyle=highlight; c.globalAlpha=0.5+this.rnd()*0.5;
+          c.beginPath();
+          tri.forEach((k,i)=> i? c.lineTo(q[k][0],q[k][1]) : c.moveTo(q[k][0],q[k][1]));
+          c.closePath(); c.fill(); c.globalAlpha=1;
+        }
+      });
+    }
+    return this;
+  }
+
+  /* opal — dark ground, big irregular cells, each a different hue
+     from a magenta -> cyan -> gold sweep */
+  opal(bg='#0a0a12', cells=6, hueA=280, hueB=60){
+    const c=this.c;
+    c.fillStyle=bg; c.fillRect(0,0,this.w,this.h);
+    const cw=this.w/cells;
+    for(let y=0;y<cells;y++) for(let x=0;x<cells;x++){
+      if(this.rnd()<0.16) continue;
+      const t=this.rnd();
+      c.fillStyle=hsl(hueA+(hueB-hueA)*t, 92, 52+this.rnd()*14);
+      c.globalAlpha=0.55+this.rnd()*0.45;
+      c.beginPath();
+      const cx=x*cw+cw*0.5+(this.rnd()-0.5)*cw*0.5, cy=y*cw+cw*0.5+(this.rnd()-0.5)*cw*0.5;
+      const pts=5+Math.floor(this.rnd()*3);
+      for(let k=0;k<pts;k++){
+        const a=k/pts*TAU+this.rnd()*0.4, rr=cw*(0.30+this.rnd()*0.36);
+        k? c.lineTo(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr)
+         : c.moveTo(cx+Math.cos(a)*rr,cy+Math.sin(a)*rr);
+      }
+      c.closePath(); c.fill();
+    }
+    c.globalAlpha=1;
+    for(let i=0;i<40;i++){
+      c.fillStyle='rgba(255,255,255,'+(0.3+this.rnd()*0.6)+')';
+      c.beginPath(); c.arc(this.rnd()*this.w,this.rnd()*this.h,this.rnd()*1.6+0.4,0,TAU); c.fill();
+    }
+    return this;
+  }
+
+  /* gold filigree that follows the part edges — composable prestige trim */
+  filigree(col='#e0be62', density=10, inset=0.10){
+    const c=this.c; c.save();
+    c.strokeStyle=col; c.lineWidth=Math.max(1.6,this.w*0.006);
+    c.shadowColor=col; c.shadowBlur=6;
+    const m=this.w*inset;
+    c.strokeRect(m,m,this.w-m*2,this.h-m*2);
+    c.lineWidth=Math.max(1,this.w*0.0035);
+    for(let i=0;i<density;i++){
+      const edge=Math.floor(this.rnd()*4);
+      let x = edge===1? this.w-m : edge===3? m : m+this.rnd()*(this.w-m*2);
+      let y = edge===0? m : edge===2? this.h-m : m+this.rnd()*(this.h-m*2);
+      const r=this.w*(0.03+this.rnd()*0.06);
+      c.beginPath();
+      for(let k=0;k<=26;k++){
+        const a=k/26*TAU*1.25, rr=r*(k/26);
+        const px=x+Math.cos(a)*rr, py=y+Math.sin(a)*rr;
+        k? c.lineTo(px,py) : c.moveTo(px,py);
+      }
+      c.stroke();
+    }
+    c.restore(); c.shadowBlur=0; return this;
+  }
+
+  /* Valorant-style panel seams: a few long breaks, not surface noise */
+  panelLines(col='rgba(0,0,0,0.55)', n=4, hi='rgba(255,255,255,0.16)'){
+    const c=this.c;
+    for(let i=0;i<n;i++){
+      const y=this.h*(0.12+this.rnd()*0.76);
+      c.strokeStyle=col; c.lineWidth=Math.max(1.5,this.w*0.007);
+      c.beginPath(); c.moveTo(0,y); c.lineTo(this.w,y+(this.rnd()-0.5)*this.h*0.10); c.stroke();
+      c.strokeStyle=hi; c.lineWidth=Math.max(1,this.w*0.004);
+      c.beginPath(); c.moveTo(0,y+2.5); c.lineTo(this.w,y+2.5+(this.rnd()-0.5)*this.h*0.10); c.stroke();
+    }
+    return this;
+  }
+
+  /* the accent spine — one emissive seam down the length of the receiver */
+  seam(col, thick=0.030, pos=0.50, glow=true){
+    const c=this.c; c.save();
+    if(glow){ c.shadowColor=col; c.shadowBlur=16; }
+    c.fillStyle=col;
+    c.fillRect(0, this.h*pos - this.h*thick*0.5, this.w, this.h*thick);
+    c.restore(); c.shadowBlur=0; return this;
+  }
+
+  /* one hero mark, mid-body — the thing the eye lands on */
+  emblem(kind, col, x=0.30, y=0.48, size=0.20){
+    const c=this.c; const cx=this.w*x, cy=this.h*y, r=this.w*size*0.5;
+    c.save(); c.translate(cx,cy);
+    c.strokeStyle=col; c.fillStyle=col; c.lineWidth=Math.max(2,r*0.10);
+    c.shadowColor=col; c.shadowBlur=10;
+    if(kind==='wolf'){
+      c.beginPath(); c.moveTo(0,-r); c.lineTo(r*0.75,-r*0.35); c.lineTo(r*0.5,r*0.2);
+      c.lineTo(0,r); c.lineTo(-r*0.5,r*0.2); c.lineTo(-r*0.75,-r*0.35); c.closePath(); c.stroke();
+      c.fillRect(-r*0.42,-r*0.28,r*0.30,r*0.16); c.fillRect(r*0.12,-r*0.28,r*0.30,r*0.16);
+    } else if(kind==='eye'){
+      c.beginPath(); c.ellipse(0,0,r,r*0.55,0,0,TAU); c.stroke();
+      c.beginPath(); c.arc(0,0,r*0.30,0,TAU); c.fill();
+    } else if(kind==='rune'){
+      c.beginPath(); c.moveTo(0,-r); c.lineTo(0,r); c.moveTo(-r*0.6,-r*0.4); c.lineTo(r*0.6,-r*0.4);
+      c.moveTo(-r*0.45,r*0.35); c.lineTo(r*0.45,r*0.35); c.stroke();
+      c.beginPath(); c.arc(0,0,r*0.62,0,TAU); c.stroke();
+    } else if(kind==='crest'){
+      c.beginPath(); c.moveTo(0,-r); c.lineTo(r*0.7,-r*0.5); c.lineTo(r*0.7,r*0.25);
+      c.lineTo(0,r); c.lineTo(-r*0.7,r*0.25); c.lineTo(-r*0.7,-r*0.5); c.closePath(); c.stroke();
+      c.beginPath(); c.arc(0,-r*0.05,r*0.26,0,TAU); c.fill();
+    } else if(kind==='bolt'){
+      c.beginPath(); c.moveTo(r*0.15,-r); c.lineTo(-r*0.55,r*0.10); c.lineTo(-r*0.05,r*0.10);
+      c.lineTo(-r*0.18,r); c.lineTo(r*0.6,-r*0.18); c.lineTo(r*0.08,-r*0.18); c.closePath(); c.fill();
+    } else {  /* ring */
+      c.beginPath(); c.arc(0,0,r,0,TAU); c.stroke();
+      c.beginPath(); c.arc(0,0,r*0.45,0,TAU); c.fill();
+    }
+    c.restore(); c.shadowBlur=0; return this;
+  }
+
+  /* stencilled wordmark — cheap character, reads at viewmodel scale */
+  stencil(txt, col='rgba(240,244,250,0.55)', size=0.10, x=0.06, y=0.22){
+    const c=this.c; c.save();
+    c.fillStyle=col;
+    c.font=`700 ${Math.round(this.w*size)}px "Arial Black","Segoe UI",sans-serif`;
+    c.fillText(txt, this.w*x, this.h*y);
+    c.restore(); return this;
+  }
+
+  /* one diagonal gloss band — sells a clearcoat without a shader */
+  sheen(alpha=0.20, ang=0.9){
+    const c=this.c; c.save(); c.globalCompositeOperation='screen';
+    c.translate(this.w/2,this.h/2); c.rotate(ang); c.translate(-this.w,-this.h);
+    const g=c.createLinearGradient(0,0,this.w*0.9,0);
+    g.addColorStop(0,'rgba(255,255,255,0)');
+    g.addColorStop(0.5,`rgba(255,255,255,${alpha})`);
+    g.addColorStop(1,'rgba(255,255,255,0)');
+    c.fillStyle=g; c.fillRect(0,0,this.w*2,this.h*2);
+    c.restore(); return this;
+  }
+
+  /* sparse bright specks — iridescence topping */
+  specks(col='#ffffff', n=50, max=2.2){
+    const c=this.c;
+    for(let i=0;i<n;i++){
+      c.fillStyle=col; c.globalAlpha=0.25+this.rnd()*0.7;
+      c.beginPath(); c.arc(this.rnd()*this.w,this.rnd()*this.h,this.rnd()*max+0.3,0,TAU); c.fill();
+    }
+    c.globalAlpha=1; return this;
+  }
+
   /* ---- wear ------------------------------------------------ */
   applyWear(baseMetal='#4a4d55'){
     const f=this.wear; if(f<=0.02) return this;
@@ -938,6 +1217,10 @@ function skinCanvas(skin, part, float, size){
   ctx.imageSmoothingEnabled = true;
   try { skin.paint(P); } catch(e){ P.fill('#6b6f78'); console.warn('paint fail',skin.id,e); }
   if(skin.wearable!==false) P.applyWear(skin.baseMetal||'#4b4e57');
+  if(TexCache.size > 320){                      /* keep VRAM/heap bounded */
+    const oldest = TexCache.keys().next().value;
+    TexCache.delete(oldest);
+  }
   TexCache.set(key, cv);
   return cv;
 }
@@ -997,8 +1280,8 @@ const MATKIND = {
 const WEAPONS = {
 
   kr47: {
-    hands:{r:[-0.148,-0.048,-0.022], l:[ 0.320,-0.014,-0.030]},
-    vm:{hip:[0.128,-0.128,-0.335], scale:0.98, adsZ:-0.225},
+    hands:{r:[-0.148,-0.048,-0.022], l:[ 0.245,-0.016,-0.030]},
+    vm:{hand:[0.118,-0.152,-0.300], hip:[0.128,-0.128,-0.335], scale:0.98, adsZ:-0.225},
     name:'KR-47', class:'Assault Rifle', mag:30, rpm:600, dmg:33, hs:2.6,
     spread:0.011, recoil:[0.019,0.010], reload:2.35, adsFov:52, adsTime:0.20,
     sfx:{body:150,bright:2400,len:0.24,vol:0.95},
@@ -1045,8 +1328,8 @@ const WEAPONS = {
   },
 
   mx4: {
-    hands:{r:[-0.130,-0.048,-0.020], l:[ 0.333,-0.050,-0.028]},
-    vm:{hip:[0.124,-0.124,-0.305], scale:1.00, adsZ:-0.300},
+    hands:{r:[-0.130,-0.048,-0.020], l:[ 0.333,-0.052,-0.028]},
+    vm:{hand:[0.114,-0.150,-0.288], hip:[0.124,-0.124,-0.305], scale:1.00, adsZ:-0.300},
     name:'MX-4', class:'Assault Rifle', mag:25, rpm:720, dmg:29, hs:2.7,
     spread:0.0085, recoil:[0.015,0.008], reload:2.05, adsFov:50, adsTime:0.17,
     sfx:{body:190,bright:3000,len:0.20,vol:0.85},
@@ -1083,8 +1366,8 @@ const WEAPONS = {
   },
 
   hornet: {
-    hands:{r:[-0.098,-0.042,-0.020], l:[ 0.315, 0.006,-0.028]},
-    vm:{hip:[0.116,-0.116,-0.256], scale:1.04, adsZ:-0.300},
+    hands:{r:[-0.098,-0.042,-0.020], l:[ 0.290, 0.004,-0.028]},
+    vm:{hand:[0.106,-0.143,-0.258], hip:[0.116,-0.116,-0.256], scale:1.04, adsZ:-0.300},
     name:'Hornet', class:'SMG', mag:32, rpm:900, dmg:22, hs:1.9,
     spread:0.017, recoil:[0.011,0.007], reload:1.85, adsFov:58, adsTime:0.13,
     sfx:{body:230,bright:3400,len:0.15,vol:0.7},
@@ -1121,8 +1404,8 @@ const WEAPONS = {
   },
 
   reaper: {
-    hands:{r:[-0.185,-0.054,-0.022], l:[ 0.325,-0.006,-0.032]},
-    vm:{hip:[0.164,-0.140,-0.372], scale:0.82, adsZ:-0.280},
+    hands:{r:[-0.185,-0.054,-0.022], l:[ 0.250,-0.008,-0.032]},
+    vm:{hand:[0.132,-0.158,-0.330], hip:[0.164,-0.140,-0.372], scale:0.82, adsZ:-0.280},
     name:'Reaper', class:'Sniper Rifle', mag:5, rpm:41, dmg:115, hs:2.2,
     spread:0.0025, recoil:[0.060,0.020], reload:3.4, adsFov:16, adsTime:0.34,
     bolt:true, scope:true,
@@ -1166,7 +1449,7 @@ const WEAPONS = {
 
   sidewinder: {
     hands:{r:[-0.062,-0.054,-0.014], l:[-0.056,-0.082,-0.046]},
-    vm:{hip:[0.104,-0.110,-0.272], scale:1.00, adsZ:-0.430},
+    vm:{hand:[0.098,-0.138,-0.250], hip:[0.104,-0.110,-0.272], scale:1.00, adsZ:-0.430},
     name:'Sidewinder', class:'Heavy Pistol', mag:7, rpm:260, dmg:58, hs:2.4,
     spread:0.012, recoil:[0.040,0.016], reload:2.1, adsFov:56, adsTime:0.15,
     sfx:{body:130,bright:2800,len:0.28,vol:0.9},
@@ -1207,6 +1490,22 @@ const WEAPON_ORDER = ['kr47','mx4','hornet','reaper','sidewinder'];
    ============================================================ */
 
 const MatCache = new Map();
+/* Extruding a profile means triangulating a shape — expensive, and
+   identical every time. Cache by weapon+part so swapping guns is free. */
+const GeoCache = new Map();
+function cachedExtrude(key, pts, depth, radius){
+  let g = GeoCache.get(key);
+  if(!g){ g = extrudePart(pts, depth, radius); projectUVs(g); g.userData.shared = true; GeoCache.set(key, g); }
+  return g;
+}
+function cachedCyl(key, r1, r2, len, open){
+  let g = GeoCache.get(key);
+  if(!g){
+    g = new THREE.CylinderGeometry(r1, r2, len, 20, 1, !!open);
+    g.rotateZ(Math.PI/2); g.userData.shared = true; GeoCache.set(key, g);
+  }
+  return g;
+}
 
 function texFromCanvas(cv, aniso){
   const t = new THREE.CanvasTexture(cv);
@@ -1285,8 +1584,8 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
   parts.forEach(p=>{
     if(hidden.has(p.id)) return;
     const def = (mods.replace && mods.replace[p.id]) ? Object.assign({}, p, mods.replace[p.id]) : p;
-    const geo = extrudePart(def.pts, def.depth, def.radius);
-    projectUVs(geo);
+    const geo = cachedExtrude(weaponId+'|'+def.id+'|'+(def.pts===p.pts?'b':'m'),
+                              def.pts, def.depth, def.radius);
     const m = makeMaterial(skin, def.kindOverride||def.kind, def.mat, float);
     const mesh = new THREE.Mesh(geo, m);
     mesh.name = def.id;
@@ -1298,8 +1597,8 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
   (W.cyl||[]).concat(mods.addCyl||[]).forEach(c=>{
     if(hidden.has(c.id)) return;
     const def = (mods.replace && mods.replace[c.id]) ? Object.assign({}, c, mods.replace[c.id]) : c;
-    const geo = new THREE.CylinderGeometry(def.r1, def.r2, def.len, 20, 1, !!def.open);
-    geo.rotateZ(Math.PI/2);
+    const geo = cachedCyl(weaponId+'|c|'+def.id+'|'+(def===c?'b':'m'),
+                          def.r1, def.r2, def.len, def.open);
     const m = makeMaterial(skin, def.kindOverride||def.kind, def.mat, float,
       def.open? {tag:'open'} : null);
     if(def.open && m.side!==THREE.DoubleSide) m.side = THREE.DoubleSide;
@@ -1317,8 +1616,6 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
     catch(e){ console.warn('mod build failed', skin.id, e); }
   }
 
-  if(!opts_noArms) buildViewArms(root, W, sub);
-
   root.userData.skin = skin;
   root.userData.mods = mods;
   root.userData.weapon = W;
@@ -1329,20 +1626,31 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
 
 
 /* ============================================================
-   Viewmodel arms — blocky Roblox proportions, jointed so they
-   actually reach the weapon's grip points.
+   Viewmodel arms — Roblox R6 proportions: ONE solid block per arm,
+   no elbow joint, no ball caps. The shoulder is pinned to the
+   player's body (fixed relative to the head), and the arm reaches
+   for whatever the hands are doing. The arms drive the weapon —
+   the weapon hangs off the right wrist — so a skin's inspect
+   animation spins the gun in the hand instead of dragging the
+   arm into impossible poses.
    ============================================================ */
 const ARM = {
-  skin:'#c98a5c', sleeve:'#1b2128', cuff:'#2c333b', glove:'#12161a',
-  r:0.049, matCache:{}
+  skin:'#c98a5c', sleeve:'#2b3440', cuff:'#3a3027', glove:'#171c22',
+  w:0.070, handLen:0.084, cuffLen:0.020, maxReach:0.88, matCache:{}
 };
+/* shoulders sit slightly BEHIND the eye, so the arm's blunt inner end
+   is clipped by the near plane and never shows as a floating stump */
+const SHOULDER = { r:[ 0.185,-0.235,-0.010], l:[-0.128,-0.262,-0.020] };
+/* where a hand goes when it lets go of the weapon */
+const REST     = { r:[ 0.260,-0.430,-0.060], l:[-0.230,-0.430,-0.060] };
+
 function armMat(kind){
   if(ARM.matCache[kind]) return ARM.matCache[kind];
   const cfg = {
-    skin  :{color:ARM.skin,   rough:0.72, metal:0.02},
+    skin  :{color:ARM.skin,   rough:0.70, metal:0.02},
     sleeve:{color:ARM.sleeve, rough:0.92, metal:0.02},
-    cuff  :{color:ARM.cuff,   rough:0.70, metal:0.10},
-    glove :{color:ARM.glove,  rough:0.78, metal:0.05}
+    cuff  :{color:ARM.cuff,   rough:0.78, metal:0.04},
+    glove :{color:ARM.glove,  rough:0.80, metal:0.05}
   }[kind];
   const m = new THREE.MeshStandardMaterial({
     color:new THREE.Color(cfg.color), roughness:cfg.rough,
@@ -1352,94 +1660,39 @@ function armMat(kind){
   return m;
 }
 
-/* a boxy limb segment from a to b, with rounded joint caps */
-function limbSeg(a, b, r, mat, taper){
+/* one block arm + a cuff band + a hand block at the far end */
+function buildR6Arm(){
   const g = new THREE.Group();
-  const dir = new THREE.Vector3().subVectors(b, a);
-  const len = dir.length();
-  const box = new THREE.BoxGeometry(r*2, r*2, len);
-  /* taper the far end so the forearm narrows toward the wrist */
-  if(taper && taper!==1){
-    const pos = box.attributes.position;
-    for(let i=0;i<pos.count;i++){
-      if(pos.getZ(i) > 0){ pos.setX(i, pos.getX(i)*taper); pos.setY(i, pos.getY(i)*taper); }
-    }
-    pos.needsUpdate = true; box.computeVertexNormals();
-  }
-  const m = new THREE.Mesh(box, mat);
-  m.castShadow = true;
-  g.add(m);
-  const cap = new THREE.Mesh(new THREE.SphereGeometry(r*1.02, 12, 9), mat);
-  cap.position.z = -len/2; g.add(cap);
-  const cap2 = new THREE.Mesh(new THREE.SphereGeometry(r*1.02*(taper||1), 12, 9), mat);
-  cap2.position.z = len/2; g.add(cap2);
-  g.position.copy(a).addScaledVector(dir, 0.5);
-  g.lookAt(b);
+  const limb = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), armMat('sleeve'));
+  const cuff = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), armMat('cuff'));
+  const hand = new THREE.Mesh(new THREE.BoxGeometry(1,1,1), armMat('skin'));
+  const knuck= new THREE.Mesh(new THREE.BoxGeometry(1,1,1), armMat('glove'));
+  limb.castShadow = hand.castShadow = true;
+  g.add(limb, cuff, hand, knuck);
+  g.userData = {limb, cuff, hand, knuck};
   return g;
 }
 
-/* The shoulder is pinned to a fixed spot on the player's body in VIEW
-   space, then converted back into gun-local space. That keeps the arm
-   root just in front of the near plane for every weapon, whatever its
-   viewmodel offset — otherwise a long rifle drags the shoulder behind
-   the camera and the sleeve smears across the screen. */
-const BODY = { r:[ 0.300,-0.158,-0.280], l:[-0.165,-0.158,-0.300] };
-
-function toLocal(viewPt, vm, s){
-  return new THREE.Vector3(
-    (vm.hip[2] - viewPt[2]) / s,
-    (viewPt[1] - vm.hip[1]) / s,
-    (viewPt[0] - vm.hip[0]) / s
-  );
-}
-
-function buildArm(hand, side, vm, s){
-  const G = new THREE.Group();
-  const H = new THREE.Vector3(hand[0], hand[1], hand[2]);
-  const S = toLocal(side>0? BODY.r : BODY.l, vm, s);
-
-  /* elbow drops and swings outboard, the way a firing stance sits */
-  const E = new THREE.Vector3().lerpVectors(S, H, 0.50);
-  E.y -= 0.040/s; E.z += side * 0.055/s; E.x -= 0.010/s;
-
-  const r = ARM.r / s;
-  G.add(limbSeg(S, E, r*1.05, armMat('sleeve'), 1.0));
-  G.add(limbSeg(E, H, r*0.90, armMat('sleeve'), 0.84));
-
-  const wrist = new THREE.Vector3().lerpVectors(E, H, 0.82);
-  const cuff = new THREE.Mesh(new THREE.CylinderGeometry(r*0.90, r*0.84, 0.028/s, 12), armMat('cuff'));
-  cuff.position.copy(wrist);
-  cuff.lookAt(H); cuff.rotateX(Math.PI/2);
-  G.add(cuff);
-
-  /* hand: palm block, dark glove back, wrapped thumb, knuckle row */
-  const hg = new THREE.Group();
-  const palm = new THREE.Mesh(new THREE.BoxGeometry(r*1.50, r*1.85, r*1.30), armMat('skin'));
-  palm.castShadow = true; hg.add(palm);
-  const back = new THREE.Mesh(new THREE.BoxGeometry(r*1.56, r*0.52, r*1.36), armMat('glove'));
-  back.position.y = r*0.70; hg.add(back);
-  const thumb = new THREE.Mesh(new THREE.BoxGeometry(r*0.52, r*1.10, r*0.52), armMat('skin'));
-  thumb.position.set(0, r*0.28, -side*r*0.80);
-  thumb.rotation.x = side*0.35; hg.add(thumb);
-  const knuck = new THREE.Mesh(new THREE.BoxGeometry(r*1.40, r*0.40, r*0.52), armMat('skin'));
-  knuck.position.set(0, -r*0.60, r*0.48); hg.add(knuck);
-  hg.position.copy(H);
-  hg.lookAt(new THREE.Vector3(H.x + 0.12/s, H.y - 0.05/s, H.z + side*0.05/s));
-  hg.rotateY(Math.PI/2);
-  G.add(hg);
-  return G;
-}
-
-function buildViewArms(root, W, sub){
-  if(!W.hands) return;
-  const vm = W.vm || {hip:[0.15,-0.14,-0.36], scale:1};
-  const s = vm.scale || 1;
-  const g = new THREE.Group();
-  g.name = 'arms';
-  g.add(buildArm(W.hands.r,  1, vm, s));
-  g.add(buildArm(W.hands.l, -1, vm, s));
-  sub('static').add(g);
-  root.userData.arms = g;
+/* orient the block from the shoulder to wherever the hand needs to be.
+   lookAt puts +Z on the target, so everything is laid out along +Z. */
+const _armDir = new THREE.Vector3();
+function poseR6Arm(g, S, T, roll){
+  const d = _armDir.subVectors(T, S).length();
+  const len = clamp(d, 0.14, ARM.maxReach);
+  g.position.copy(S);
+  g.lookAt(T);
+  if(roll) g.rotateZ(roll);
+  const w = ARM.w, hl = ARM.handLen, cl = ARM.cuffLen;
+  const limbLen = Math.max(0.03, len - hl);
+  const u = g.userData;
+  u.limb.scale.set(w, w, limbLen);
+  u.limb.position.set(0, 0, limbLen*0.5);
+  u.cuff.scale.set(w*1.07, w*1.07, cl);
+  u.cuff.position.set(0, 0, limbLen - cl*0.5);
+  u.hand.scale.set(w*1.10, w*1.10, hl);
+  u.hand.position.set(0, 0, limbLen + hl*0.5);
+  u.knuck.scale.set(w*1.14, w*0.34, hl*0.62);
+  u.knuck.position.set(0, w*0.46, limbLen + hl*0.58);
 }
 /* ---- shared helpers usable by skin mods ---------------------------- */
 const ModKit = {
@@ -1498,9 +1751,26 @@ const ModKit = {
 
 /* ===== 40_skins.js ===== */
 /* ============================================================
-   SKIN CATALOG
-   Low tiers  : honest paint jobs — solid polymer, camo, simple.
-   High tiers : new geometry, emissive parts, custom animations.
+   SKIN CATALOG  —  rebuilt on the VALORANT / Roblox-shooter study.
+
+   Rules enforced throughout:
+     · dark or neutral base + ONE saturated accent. Three hues, max.
+     · the accent lands on 2-3 of four zones only: muzzle, magazine,
+       a spine seam down the receiver, and a single emblem.
+     · pattern scale is BIG. If it wouldn't read in a killcam
+       thumbnail it is noise, and noise is what cheap looks like.
+     · metal is PAINTED — hard horizon + blown specular streaks —
+       because real specular dissolves at viewmodel scale.
+     · low tiers buy their accent with gloss-vs-matte, not with glow.
+
+   VFX ladder (Valorant's, and in Riot's own order — fire feedback
+   first, ambience second, ceremony last):
+     consumer / industrial ...... nothing. Stock flash, stock tracer.
+     mil-spec ................... nothing. Identity comes from paint.
+     restricted ................. tinted tracer.
+     classified ................. custom muzzle flash + tracer.
+     covert ..................... + custom impact + live model VFX.
+     exotic ..................... + sparks, brass tint, impact bursts.
    ============================================================ */
 
 const RARITY = {
@@ -1514,7 +1784,6 @@ const RARITY = {
 };
 const RARITY_ORDER = ['consumer','industrial','milspec','restricted','classified','covert','exotic'];
 
-/* case odds, mirrored from the CS:GO distribution */
 const CASE_ODDS = [
   {r:'milspec',    p:0.7992},
   {r:'restricted', p:0.1598},
@@ -1523,7 +1792,6 @@ const CASE_ODDS = [
   {r:'exotic',     p:0.0026}
 ];
 
-/* wear bands */
 const WEARS = [
   {id:'fn', name:'Factory New',   abbr:'FN', max:0.07, mul:1.00},
   {id:'mw', name:'Minimal Wear',  abbr:'MW', max:0.15, mul:0.78},
@@ -1533,48 +1801,51 @@ const WEARS = [
 ];
 function wearOf(f){ return WEARS.find(w=> f < w.max) || WEARS[4]; }
 
-/* ---------- shorthand paint recipes --------------------------------- */
-function basePolymer(P, col, sheen){
+/* ---------- shared surface recipes ---------------------------------- */
+function polymer(P, col, gloss){
   P.fill(col);
-  P.grad([[0,'rgba(255,255,255,0.16)'],[0.45,'rgba(255,255,255,0.02)'],[1,'rgba(0,0,0,0.30)']],0.9);
-  P.grain(sheen==null?0.05:sheen);
+  P.grad([[0,'rgba(255,255,255,0.13)'],[0.44,'rgba(255,255,255,0.01)'],[1,'rgba(0,0,0,0.34)']],0.95);
+  P.grain(0.045);
+  if(gloss) P.sheen(gloss);
 }
 function gripTexture(P, col){
   P.fill(col);
   const c=P.c;
-  for(let y=6;y<P.h;y+=14) for(let x=6;x<P.w;x+=14){
-    c.fillStyle='rgba(0,0,0,0.35)'; c.beginPath(); c.arc(x,y,3.4,0,TAU); c.fill();
-    c.fillStyle='rgba(255,255,255,0.10)'; c.beginPath(); c.arc(x-1,y-1,2.4,0,TAU); c.fill();
+  for(let y=7;y<P.h;y+=15) for(let x=7;x<P.w;x+=15){
+    c.fillStyle='rgba(0,0,0,0.38)'; c.beginPath(); c.arc(x,y,3.6,0,TAU); c.fill();
+    c.fillStyle='rgba(255,255,255,0.09)'; c.beginPath(); c.arc(x-1.2,y-1.2,2.4,0,TAU); c.fill();
   }
-  P.grain(0.05);
+  P.grain(0.04);
 }
 function woodTexture(P, a, b){
   P.fill(a);
   const c=P.c;
-  for(let i=0;i<70;i++){
-    c.strokeStyle = i%3? b : 'rgba(0,0,0,0.20)';
-    c.globalAlpha = 0.15+P.rnd()*0.4; c.lineWidth = 1+P.rnd()*4;
+  for(let i=0;i<52;i++){
+    c.strokeStyle = i%3? b : 'rgba(0,0,0,0.22)';
+    c.globalAlpha = 0.15+P.rnd()*0.4; c.lineWidth = 1.5+P.rnd()*5;
     c.beginPath();
     let y = P.rnd()*P.h;
     c.moveTo(0,y);
-    for(let x=0;x<P.w;x+=24) c.lineTo(x, y + Math.sin(x*0.03+i)*7 + (P.rnd()-0.5)*4);
+    for(let x=0;x<P.w;x+=28) c.lineTo(x, y + Math.sin(x*0.028+i)*8 + (P.rnd()-0.5)*5);
     c.stroke();
   }
   c.globalAlpha=1;
-  P.grad([[0,'rgba(255,235,200,0.14)'],[1,'rgba(40,20,0,0.35)']],1.2);
-  P.grain(0.04);
+  P.grad([[0,'rgba(255,235,200,0.10)'],[1,'rgba(35,16,0,0.42)']],1.2);
+  P.grain(0.035);
 }
-/* standard "boring but clean" skin factory for the low tiers */
+
+/* Low-tier factory. Broad colour blocking, one motif, material
+   contrast instead of glow — the Select-tier playbook. */
 function simpleSkin(o){
   return Object.assign({
     paint(P){
       switch(P.part){
-        case 'grip': gripTexture(P, o.gripCol || shade(o.col,-0.20)); break;
-        case 'wood': o.woodCols? woodTexture(P,o.woodCols[0],o.woodCols[1]) : basePolymer(P, o.col); break;
-        case 'mag':  basePolymer(P, o.magCol || shade(o.col,-0.08)); break;
-        case 'accent': basePolymer(P, o.accentCol || '#2c2f36', 0.04); break;
+        case 'grip':   gripTexture(P, o.gripCol || shade(o.col,-0.22)); break;
+        case 'wood':   o.woodCols? woodTexture(P,o.woodCols[0],o.woodCols[1]) : polymer(P, o.col, o.gloss); break;
+        case 'mag':    polymer(P, o.magCol || shade(o.col,-0.10), o.gloss); break;
+        case 'accent': polymer(P, o.accentCol || '#23262c'); P.panelLines('rgba(0,0,0,0.4)',2); break;
         default:
-          basePolymer(P, o.col);
+          polymer(P, o.col, o.gloss);
           if(o.pattern) o.pattern(P);
       }
     }
@@ -1591,57 +1862,96 @@ add(simpleSkin({id:'kr47_default', name:'Field Issue', weapon:'kr47', rarity:'co
   col:'#2e3238', accentCol:'#1f2126', woodCols:['#54341c','#38220f']}));
 
 add(simpleSkin({id:'kr47_sandstorm', name:'Sandstorm', weapon:'kr47', rarity:'industrial',
-  col:'#b9a077', accentCol:'#4a4438', gripCol:'#544a3a', woodCols:['#8a6b45','#5e4227'],
-  pattern:P=>{ P.blobs(['#8c7a55','#6f6349','#cbb68e'],14,0.26,0.85); P.grain(0.05); }}));
+  col:'#b9a077', accentCol:'#40392e', gripCol:'#4a4234', woodCols:['#8a6b45','#5e4227'],
+  pattern:P=>{ P.blobs(['#8c7a55','#6f6349','#cbb68e'],7,0.34,0.9); P.grain(0.045); }}));
 
 add(simpleSkin({id:'kr47_slate', name:'Slate', weapon:'kr47', rarity:'industrial',
-  col:'#59636e', accentCol:'#31363d', woodCols:['#4d5560','#343a42'],
-  pattern:P=> P.brushed(0.10)}));
+  col:'#59636e', accentCol:'#2b3037', woodCols:['#4d5560','#343a42'], gloss:0.14,
+  pattern:P=>{ P.brushed(0.11); P.panelLines('rgba(0,0,0,0.42)',3); }}));
 
+/* mil-spec: identity from paint alone, no VFX */
 add(simpleSkin({id:'kr47_hexforge', name:'Hexforge', weapon:'kr47', rarity:'milspec',
-  col:'#1d2733', accentCol:'#20262e', woodCols:['#243040','#18202b'],
-  pattern:P=>{ P.hexCamo(['#22303f','#2c435c','#39628a','#1a2530'],40,0.95); P.vignette(0.35); }}));
-
-add(simpleSkin({id:'kr47_crimsonrail', name:'Crimson Rail', weapon:'kr47', rarity:'milspec',
-  col:'#151517', accentCol:'#1a1a1c', woodCols:['#1c1c1f','#0f0f11'], roughMul:0.7,
+  col:'#151d27', accentCol:'#1a2029', woodCols:['#1b2531','#131a23'],
   pattern:P=>{
-    const c=P.c;                                     // carbon weave
-    for(let y=0;y<P.h;y+=12) for(let x=0;x<P.w;x+=12){
-      c.fillStyle = ((x/12+y/12)%2)? '#1c1c20':'#0e0e11';
-      c.fillRect(x,y,12,12);
-      c.fillStyle='rgba(255,255,255,0.05)'; c.fillRect(x,y,12,2);
-    }
-    P.stripes(['#c0392b','#7b1f14'],3,1.35,0.9);
-    P.grain(0.03);
+    P.hexCamo(['#1b2735','#264057','#37648f','#141c26'], P.w*0.24, 1);   /* ~4 cells across */
+    P.overlayMode('multiply', p=> p.vignette(0.42));
+    P.seam('#4d8fd6', 0.016, 0.30, false);
   }}));
 
+add(simpleSkin({id:'kr47_crimsonrail', name:'Crimson Rail', weapon:'kr47', rarity:'milspec',
+  col:'#131316', accentCol:'#191919', woodCols:['#1a1a1d','#0e0e10'], roughMul:0.72, gloss:0.16,
+  pattern:P=>{
+    const c=P.c;                                            /* big carbon weave */
+    const q=P.w/14;
+    for(let y=0;y<P.h;y+=q) for(let x=0;x<P.w;x+=q){
+      c.fillStyle = ((x/q+y/q)%2)? '#1e1e23':'#0d0d10';
+      c.fillRect(x,y,q,q);
+      c.fillStyle='rgba(255,255,255,0.055)'; c.fillRect(x,y,q,q*0.18);
+    }
+    P.seam('#c0392b', 0.055, 0.66, false);
+    P.seam('#e8564a', 0.012, 0.66, false);
+    P.stencil('KR-47','rgba(220,80,70,0.5)',0.11,0.06,0.30);
+  }}));
+
+/* restricted: tinted tracer arrives */
 add(simpleSkin({id:'kr47_tigerclaw', name:'Tiger Claw', weapon:'kr47', rarity:'restricted',
-  col:'#e0821f', accentCol:'#2a1a08', gripCol:'#3a2410', woodCols:['#c9721a','#8a4a10'],
-  pattern:P=>{ P.tiger('#1a1208',22,0.15); P.grad([[0,'rgba(255,220,120,0.28)'],[1,'rgba(90,40,0,0.4)']],1.1); }}));
+  col:'#e0821f', accentCol:'#241605', gripCol:'#2f1d0b', woodCols:['#c9721a','#7d4310'],
+  vfx:{tracer:{color:'#ff9a2e'}},
+  pattern:P=>{
+    P.tiger('#140d05', 9, 0.16);                            /* 9 stripes, not 22 */
+    P.grad([[0,'rgba(255,220,120,0.24)'],[1,'rgba(80,34,0,0.44)']],1.1);
+  }}));
 
 add(simpleSkin({id:'kr47_bloomsplash', name:'Bloom Splash', weapon:'kr47', rarity:'restricted',
-  col:'#f2f0ec', accentCol:'#2f3138', gripCol:'#3a3d44', woodCols:['#e7e4de','#c9c4bb'],
-  pattern:P=>{ P.splatter(['#ff2d6f','#00d0ff','#ffd400','#7b2ff7'],150,0.075); P.splatter(['#111'],25,0.02); }}));
+  col:'#f2f0ec', accentCol:'#2a2c31', gripCol:'#34373d', woodCols:['#e7e4de','#c9c4bb'], gloss:0.22,
+  vfx:{tracer:{color:'#ff4d8d'}},
+  pattern:P=>{
+    P.splatter(['#ff2d6f','#00d0ff','#ffd400'], 26, 0.16);  /* fewer, far bigger */
+    P.splatter(['#1a1a1e'], 8, 0.05);
+    P.sheen(0.16);
+  }}));
 
-add(simpleSkin({id:'kr47_neurograph', name:'Neurograph', weapon:'kr47', rarity:'classified',
-  col:'#05131a', accentCol:'#061a20', gripCol:'#07222a', woodCols:['#062028','#03151b'],
+/* classified: custom flash + tracer */
+add({
+  id:'kr47_neurograph', name:'Neurograph', weapon:'kr47', rarity:'classified',
   emissive:'#25f0d0', emissiveKinds:['body','wood','mag'], emissiveIntensity:0.55,
-  metalOverride:0.45, roughMul:0.6, envBoost:1.5,
-  pattern:P=>{ P.circuit('#0affe0','#25f0d0',30); P.glyphs('#0affe0',12); P.vignette(0.5); }}));
+  metalOverride:0.42, roughMul:0.58, envBoost:1.5,
+  vfx:{
+    flash:{shape:'ring', core:'#d8fff6', corona:'#25f0d0', coronaScale:1.9, light:'#25f0d0'},
+    tracer:{color:'#25f0d0', width:0.9}
+  },
+  paint(P){
+    if(P.part==='grip'){ gripTexture(P,'#07222a'); return; }
+    P.fill('#04121a');
+    P.radial('rgba(8,70,80,0.55)','rgba(0,0,0,0)',0.42,0.5,0.75);
+    P.circuit('#0affe0','#25f0d0', 9);                      /* 9 traces, wide gaps */
+    P.seam('#25f0d0', 0.020, 0.28);
+    if(P.part==='body') P.emblem('ring','#7dfff0',0.72,0.52,0.16);
+    P.vignette(0.52);
+  }
+});
 
-/* ---- COVERT: geometry + light ---- */
+/* ---- COVERT: geometry, light, custom impact ---- */
 add({
   id:'kr47_wraithcoil', name:'Wraithcoil', weapon:'kr47', rarity:'covert',
   emissive:'#8a4bff', emissiveKinds:['accent'], emissiveIntensity:1.4,
   metalOverride:0.85, roughMul:0.45, envBoost:2.0, baseMetal:'#2a2233',
-  tracer:'#a86bff', flash:'#a86bff',
+  vfx:{
+    flash:{shape:'void', core:'#c9a6ff', corona:'#8a4bff', coronaScale:2.0,
+           coronaAlpha:0.75, light:'#8a4bff', lightScale:1.2},
+    tracer:{color:'#a86bff', style:'void', width:1.1},
+    impact:{color:'#a86bff', burst:true, scale:0.9},
+    casingColor:'#6b4bb0'
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#1b1526'); return; }
-    P.fill('#120d1c');
-    P.marble(['#5c31a8','#8a4bff','#2b1a4a'],70);
-    P.overlayMode('screen', p=> p.radial('rgba(160,90,255,0.55)','rgba(0,0,0,0)',0.5,0.5,0.6));
-    P.circuit('#c9a6ff','#8a4bff',12);
-    P.grain(0.04);
+    if(P.part==='grip'){ gripTexture(P,'#181125'); return; }
+    P.fill('#0e0918');
+    P.marble(['#5c31a8','#8a4bff','#2b1a4a'], 26);          /* 26 strokes, not 70 */
+    P.overlayMode('screen', p=> p.radial('rgba(150,80,255,0.5)','rgba(0,0,0,0)',0.5,0.5,0.62));
+    P.seam('#b98bff', 0.024, 0.24);
+    if(P.part==='body') P.emblem('rune','#c9a6ff',0.68,0.55,0.20);
+    P.specks('#e0ccff',26,1.6);
+    P.grain(0.035);
   },
   mods:{
     anim:'flourish',
@@ -1655,21 +1965,19 @@ add({
         fx.add(t);
       }
       sub('static').add(ModKit.tube(0.021,0.024,0.13, dark, [0.55,0.026,0]));
-      const vent = ModKit.box(0.16,0.006,0.056, glow, [0.05,0.066,0]);
-      sub('static').add(vent);
+      fx.add(ModKit.box(0.16,0.006,0.056, glow, [0.05,0.066,0]));
       root.userData.coilLight = new THREE.PointLight(0x8a4bff, 0.9, 1.2);
       root.userData.coilLight.position.set(0.62,0.03,0);
       fx.add(root.userData.coilLight);
     },
     tick(root, t){
-      const fx = root.userData.groups.fx;
-      fx.children.forEach((c,i)=>{
+      root.userData.groups.fx.children.forEach((c,i)=>{
         if(c.userData.spin){
           c.rotation.z = t*c.userData.spin;
-          c.scale.setScalar(1 + Math.sin(t*3 + i)*0.10);
+          c.scale.setScalar(1 + Math.sin(t*2.2 + i)*0.07);  /* low-frequency only */
         }
       });
-      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.7 + Math.sin(t*5)*0.35;
+      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.7 + Math.sin(t*2.4)*0.30;
     }
   }
 });
@@ -1677,49 +1985,52 @@ add({
 /* ---- EXOTIC: the gun becomes a different object ---- */
 add({
   id:'kr47_dragonmaw', name:"Dragon's Maw", weapon:'kr47', rarity:'exotic',
-  metalOverride:1.0, roughMul:0.35, envBoost:2.6, baseMetal:'#5a3a10',
-  emissive:'#ff6a10', emissiveKinds:['accent'], emissiveIntensity:0.7,
-  tracer:'#ff7a20', flash:'#ffa030', maxFloat:0.55,
+  metalOverride:0.55, roughMul:0.62, envBoost:1.05, baseMetal:'#5a3a10',
+  emissive:'#ff6a10', emissiveKinds:['accent'], emissiveIntensity:0.7, maxFloat:0.55,
+  vfx:{
+    flash:{shape:'plume', core:'#fff0c8', corona:'#ff5a00', coronaScale:2.2, coronaShape:'plume',
+           light:'#ff7a20', lightScale:1.4, sparks:7, sparkColor:'#ffb040'},
+    tracer:{color:'#ff7a20', style:'ember', width:1.15},
+    impact:{color:'#ff7a20', burst:true, scale:1.25},
+    casingColor:'#d9a33a'
+  },
   paint(P){
-    if(P.part==='grip'){ P.fill('#2a1608'); P.scales('#301a09','#5a3312',20); P.grain(0.06); return; }
-    if(P.part==='accent'){ P.fill('#c8912e'); P.brushed(0.14); P.grad([[0,'rgba(255,230,150,0.5)'],[1,'rgba(90,50,0,0.5)']],1.0); return; }
-    P.fill('#3a0d06');
-    P.scales('#5c1408','#a8331a',26);
-    P.overlayMode('screen', p=> p.grad([[0,'rgba(255,120,20,0.45)'],[0.5,'rgba(255,40,0,0.10)'],[1,'rgba(255,180,40,0.40)']],0.6));
-    P.marble(['#ffb040','#ff5a10'],26);
-    P.vignette(0.45);
+    if(P.part==='grip'){ P.fill('#241206'); P.scales('#2c1607','#54300f', P.w*0.075); P.grain(0.05); return; }
+    if(P.part==='accent'){ P.chrome('#f0d27a','#7a5410','#fff6d8',0.44,2); return; }
+    P.fill('#320b05');
+    P.scales('#521208','#9c2f18', P.w*0.10);                /* ~10 scales across */
+    P.overlayMode('screen', p=> p.fade(['rgba(255,110,20,0.30)','rgba(255,40,0,0.04)','rgba(255,170,50,0.24)'],0.6));
+    P.marble(['#ffb040','#ff5a10'], 12);
+    P.seam('#ff8a20', 0.022, 0.20);
+    P.vignette(0.46);
   },
   mods:{
     anim:'spin', reloadStyle:'toss', scale:1.02,
-    hide:['frontsight'],
-    build(root, sub, skin){
+    hide:['frontpost','frontring'],
+    build(root, sub){
       const gold = ModKit.metalMat('#d9a33a', 0.22, 1.0);
       const ember= ModKit.glowMat('#ff6a10', 3.0);
       const st = sub('static'), fx = sub('fx');
-      /* dragon-head muzzle: jaws around the barrel */
       const jawTop = ModKit.spike(0.030,0.10, gold, [0.845,0.040,0], [0,0,0.32]);
       const jawBot = ModKit.spike(0.030,0.10, gold, [0.845,0.010,0], [0,0,-0.32]);
       st.add(jawTop, jawBot);
       root.userData.jaws=[jawTop,jawBot];
       for(let i=0;i<5;i++){
-        const f = i/4;
+        const f=i/4;
         st.add(ModKit.spike(0.012-0.004*f, 0.05, gold, [0.36+f*0.22, 0.072+f*0.006, 0], [0,0,1.1]));
       }
       st.add(ModKit.tube(0.020,0.026,0.10, gold, [0.79,0.026,0]));
       const core = ModKit.tube(0.014,0.014,0.20, ember, [0.66,0.026,0]);
-      fx.add(core);
-      root.userData.core = core;
+      fx.add(core); root.userData.core = core;
       const l = new THREE.PointLight(0xff6a10, 1.1, 1.4);
-      l.position.set(0.80,0.026,0); fx.add(l);
-      root.userData.coilLight = l;
-      /* gold receiver inlay */
+      l.position.set(0.80,0.026,0); fx.add(l); root.userData.coilLight = l;
       st.add(ModKit.box(0.34,0.008,0.054, gold, [0.0,0.030,0]));
     },
     tick(root,t){
-      if(root.userData.core) root.userData.core.material.emissiveIntensity = 2.2 + Math.sin(t*7)*1.2;
-      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.9 + Math.sin(t*7)*0.5;
+      if(root.userData.core) root.userData.core.material.emissiveIntensity = 2.2 + Math.sin(t*2.6)*0.9;
+      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.9 + Math.sin(t*2.6)*0.4;
       if(root.userData.jaws){
-        const o = Math.sin(t*1.6)*0.03;
+        const o = Math.sin(t*1.1)*0.028;                    /* slow breathing */
         root.userData.jaws[0].rotation.z = 0.32 + o;
         root.userData.jaws[1].rotation.z = -0.32 - o;
       }
@@ -1734,68 +2045,92 @@ add(simpleSkin({id:'mx4_default', name:'Standard Issue', weapon:'mx4', rarity:'c
   col:'#2b2e33', accentCol:'#1d1f23'}));
 
 add(simpleSkin({id:'mx4_urban', name:'Urban Splinter', weapon:'mx4', rarity:'industrial',
-  col:'#7d838a', accentCol:'#2f3339',
+  col:'#7d838a', accentCol:'#2c3036',
   pattern:P=>{
-    const c=P.c;
-    for(let i=0;i<160;i++){
+    const c=P.c, u=P.w/9;                                    /* 9-cell splinter grid */
+    for(let i=0;i<30;i++){
       c.fillStyle = pick(['#3d4249','#a8aeb4','#5b6169','#22252a']);
-      const w=P.w*(0.03+P.rnd()*0.09), h=P.h*(0.02+P.rnd()*0.06);
-      c.fillRect(Math.floor(P.rnd()*P.w/8)*8, Math.floor(P.rnd()*P.h/8)*8, w,h);
+      c.fillRect(Math.floor(P.rnd()*9)*u, Math.floor(P.rnd()*9)*u, u*(1+Math.floor(P.rnd()*2)), u);
     }
-    P.grain(0.05);
+    P.grain(0.045);
   }}));
 
 add(simpleSkin({id:'mx4_oxide', name:'Oxide', weapon:'mx4', rarity:'industrial',
-  col:'#6a4a35', accentCol:'#3a2a1e', metalOverride:0.6, roughMul:1.25,
-  pattern:P=>{ P.blobs(['#8a5a33','#4d3320','#b07a45','#5e3d22'],26,0.22,0.9); P.splatter(['#2e1c10'],90,0.03); P.grain(0.09); }}));
+  col:'#6a4a35', accentCol:'#33251a', metalOverride:0.55, roughMul:1.25,
+  pattern:P=>{ P.blobs(['#8a5a33','#4d3320','#b07a45'],9,0.30,0.9); P.splatter(['#2a180e'],26,0.05); P.grain(0.085); }}));
 
 add(simpleSkin({id:'mx4_arcticfox', name:'Arctic Fox', weapon:'mx4', rarity:'milspec',
-  col:'#e8ecef', accentCol:'#3c4148', gripCol:'#42474e',
-  pattern:P=>{ P.blobs(['#c7d0d6','#9aa6ae','#ffffff'],20,0.24,0.9); P.grain(0.04); }}));
+  col:'#e8ecef', accentCol:'#343a41', gripCol:'#3c424a',
+  pattern:P=>{
+    P.blobs(['#c1ccd4','#94a1ab','#ffffff'], 7, 0.32, 0.92);
+    P.seam('#5f7a8c', 0.014, 0.72, false);
+    P.grain(0.035);
+  }}));
 
 add(simpleSkin({id:'mx4_voltline', name:'Voltline', weapon:'mx4', rarity:'milspec',
-  col:'#16181c', accentCol:'#1b1d21', gripCol:'#1a1c20',
-  pattern:P=>{ P.stripes(['#f5d000','#16181c','#16181c'],9,0.62,0.95); P.brushed(0.07); }}));
+  col:'#141619', accentCol:'#1a1c20', gripCol:'#18191d',
+  pattern:P=>{
+    P.stripes(['#f5cd30','#141619','#141619'], 5, 0.62, 0.95);   /* 5 fat stripes */
+    P.seam('#f5cd30', 0.018, 0.14, false);
+    P.stencil('VOLT','rgba(245,205,48,0.55)',0.13,0.06,0.92);
+    P.brushed(0.06);
+  }}));
 
 add(simpleSkin({id:'mx4_koi', name:'Koi Ink', weapon:'mx4', rarity:'restricted',
-  col:'#f4f1ea', accentCol:'#2b2b2e', gripCol:'#33333a', roughMul:0.75, envBoost:1.4,
+  col:'#f4f1ea', accentCol:'#26262a', gripCol:'#2e2e34', roughMul:0.72, envBoost:1.4, gloss:0.2,
+  vfx:{tracer:{color:'#e05a66'}},
   pattern:P=>{
-    P.marble(['#1a1a22','#8c1f2e','#d94f5c','#1a1a22'],110);
-    P.overlayMode('multiply', p=> p.radial('rgba(255,255,255,0)','rgba(180,170,160,0.5)',0.5,0.5,0.8));
+    P.marble(['#14141c','#8c1f2e','#d94f5c'], 34);
+    P.overlayMode('multiply', p=> p.radial('rgba(255,255,255,0)','rgba(172,163,152,0.5)',0.5,0.5,0.82));
+    P.sheen(0.18);
   }}));
 
 add(simpleSkin({id:'mx4_hazmat', name:'Hazmat', weapon:'mx4', rarity:'restricted',
-  col:'#1a1c1e', accentCol:'#242628', gripCol:'#212325',
-  pattern:P=>{ P.hazard('#f0b000','#1a1c1e',30); P.glyphs('#0d0d0d',10,'⚠HAZARDBIO0123'); P.grain(0.05); }}));
+  col:'#16181a', accentCol:'#202226', gripCol:'#1c1e21',
+  vfx:{tracer:{color:'#f0b000'}},
+  pattern:P=>{
+    P.hazard('#f0b000','#16181a', P.w*0.13);                 /* ~8 bands */
+    P.overlayMode('multiply', p=> p.vignette(0.45));
+    P.stencil('⚠ 04','rgba(20,20,20,0.75)',0.14,0.60,0.30);
+  }}));
 
+/* classified — painted chrome, iridescent film */
 add({
   id:'mx4_prism', name:'Prism', weapon:'mx4', rarity:'classified',
-  metalOverride:0.95, roughMul:0.25, envBoost:2.4, baseMetal:'#8a8f9a',
+  metalOverride:0.50, roughMul:0.50, envBoost:1.10, baseMetal:'#8a8f9a',
+  vfx:{
+    flash:{shape:'shard', core:'#ffffff', corona:'#7de0ff', coronaScale:1.8, light:'#bfe9ff'},
+    tracer:{color:'#bfe9ff', width:0.9}
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#2a2d33'); return; }
-    P.holo(78, 56, 10, 0.8);
-    P.overlayMode('overlay', p=> p.hexCamo(['rgba(255,255,255,0.25)','rgba(0,0,0,0.20)'],34,0.5));
-    P.overlayMode('screen', p=> p.grad([[0,'rgba(255,255,255,0.35)'],[0.5,'rgba(255,255,255,0)'],[1,'rgba(255,255,255,0.25)']],1.2));
+    if(P.part==='grip'){ gripTexture(P,'#25282e'); return; }
+    P.chrome('#dfe8f2','#20262e','#ffffff',0.47,2);
+    P.overlayMode('screen', p=> p.holo(80, 50, 6, 0.85));
+    P.overlayMode('overlay', p=> p.hexCamo(['rgba(255,255,255,0.22)','rgba(0,0,0,0.18)'], p.w*0.20, 0.55));
+    P.sheen(0.28, 1.1);
     P.grain(0.02);
   }
 });
 
+/* covert — void rift */
 add({
   id:'mx4_nullpoint', name:'Nullpoint', weapon:'mx4', rarity:'covert',
   emissive:'#c04bff', emissiveKinds:['accent','mag'], emissiveIntensity:1.1,
   metalOverride:0.5, roughMul:0.5, envBoost:1.8, baseMetal:'#1a1424',
-  tracer:'#c04bff', flash:'#c04bff',
+  vfx:{
+    flash:{shape:'void', core:'#f0d8ff', corona:'#c04bff', coronaScale:2.1, coronaAlpha:0.8,
+           light:'#c04bff', lightScale:1.15},
+    tracer:{color:'#c04bff', style:'void', width:1.05},
+    impact:{color:'#ff7bd5', burst:true, scale:1.0},
+    casingColor:'#8a4bb8'
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#141018'); return; }
-    P.fill('#07060b');
-    P.radial('rgba(120,30,220,0.55)','rgba(0,0,0,0)',0.42,0.5,0.55);
-    P.marble(['#c04bff','#5b1fa8','#ff7bd5'],55);
-    P.overlayMode('screen', p=>{
-      const c=p.c;
-      for(let i=0;i<40;i++){ c.fillStyle='rgba(255,255,255,'+(0.1+p.rnd()*0.5)+')';
-        c.beginPath(); c.arc(p.rnd()*p.w,p.rnd()*p.h,p.rnd()*1.8+0.4,0,TAU); c.fill(); }
-    });
-    P.vignette(0.65);
+    if(P.part==='grip'){ gripTexture(P,'#120e18'); return; }
+    P.galaxy(['#7b1fd8','#3a1f9c','#d81f9c'], 150);
+    P.overlayMode('multiply', p=> p.radial('rgba(255,255,255,1)','rgba(20,10,40,1)',0.42,0.5,0.85));
+    P.seam('#e6a8ff', 0.018, 0.16);
+    if(P.part==='body') P.emblem('eye','#ff7bd5',0.70,0.54,0.18);
+    P.vignette(0.55);
   },
   mods:{
     anim:'flourish',
@@ -1804,50 +2139,57 @@ add({
       const fx = sub('fx');
       const r1 = ModKit.torus(0.055,0.0035, glow, [0.32,0.020,0]);
       const r2 = ModKit.torus(0.075,0.0028, glow, [0.32,0.020,0]);
-      r1.userData.spin=1.2; r2.userData.spin=-0.8;
+      r1.userData.spin=0.9; r2.userData.spin=-0.6;
       fx.add(r1,r2);
       const orb = new THREE.Mesh(new THREE.SphereGeometry(0.016,16,12), ModKit.glowMat('#ff7bd5',3.2));
-      orb.position.set(0.32,0.020,0); fx.add(orb);
-      root.userData.orb = orb;
+      orb.position.set(0.32,0.020,0); fx.add(orb); root.userData.orb = orb;
       const l = new THREE.PointLight(0xc04bff, 0.9, 1.3); l.position.set(0.32,0.02,0); fx.add(l);
       root.userData.coilLight = l;
       sub('static').add(ModKit.box(0.28,0.005,0.05, glow, [-0.02,0.084,0]));
     },
     tick(root,t){
       root.userData.groups.fx.children.forEach(c=>{
-        if(c.userData.spin){ c.rotation.z = t*c.userData.spin; c.rotation.x = Math.sin(t*0.7)*0.5; }
+        if(c.userData.spin){ c.rotation.z = t*c.userData.spin; c.rotation.x = Math.sin(t*0.5)*0.45; }
       });
-      if(root.userData.orb) root.userData.orb.scale.setScalar(1+Math.sin(t*4)*0.18);
-      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.7+Math.sin(t*4)*0.4;
+      if(root.userData.orb) root.userData.orb.scale.setScalar(1+Math.sin(t*2.0)*0.12);
+      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.7+Math.sin(t*2.0)*0.3;
     }
   }
 });
 
+/* exotic — holy relic */
 add({
   id:'mx4_seraph', name:'Seraph', weapon:'mx4', rarity:'exotic',
-  metalOverride:0.9, roughMul:0.22, envBoost:2.8, baseMetal:'#b9a06a',
+  metalOverride:0.45, roughMul:0.58, envBoost:1.00, baseMetal:'#b9a06a',
   emissive:'#ffe9a8', emissiveKinds:['accent'], emissiveIntensity:0.85, maxFloat:0.5,
-  tracer:'#ffe9a8', flash:'#fff2c8',
+  vfx:{
+    flash:{shape:'bloom', core:'#ffffff', corona:'#ffe9a8', coronaScale:2.1,
+           light:'#fff2c8', lightScale:1.3, sparks:6, sparkColor:'#ffe9a8'},
+    tracer:{color:'#ffe9a8', style:'holy', width:1.0},
+    impact:{color:'#fff2c8', burst:true, scale:1.2},
+    casingColor:'#e6d59a'
+  },
   paint(P){
-    if(P.part==='grip'){ P.fill('#efe7d6'); gripTexture(P,'#efe7d6'); return; }
-    if(P.part==='accent'){ P.fill('#d8b556'); P.brushed(0.16); return; }
+    if(P.part==='grip'){ gripTexture(P,'#ded3bc'); return; }
+    if(P.part==='accent'){ P.chrome('#ffeaa8','#8a6a20','#fffbe8',0.44,2); return; }
     P.fill('#f6f2e8');
-    P.overlayMode('multiply', p=> p.marble(['#d8cdb4','#c9bda0'],40));
-    const c=P.c;                                    // feather engraving
-    for(let i=0;i<28;i++){
-      c.strokeStyle='rgba(190,165,105,0.85)'; c.lineWidth=1.6;
-      const x=P.rnd()*P.w, y=P.rnd()*P.h, L=P.w*(0.06+P.rnd()*0.14), a=P.rnd()*TAU;
+    P.overlayMode('multiply', p=> p.fade(['#ffffff','#ded2b4','#a89870'], 0.9));
+    const c=P.c;                                             /* big feather engraving */
+    for(let i=0;i<9;i++){
+      c.strokeStyle='rgba(176,148,86,0.9)'; c.lineWidth=2.4;
+      const x=P.rnd()*P.w, y=P.rnd()*P.h, L=P.w*(0.16+P.rnd()*0.22), a=P.rnd()*TAU;
       c.beginPath(); c.moveTo(x,y);
-      c.quadraticCurveTo(x+Math.cos(a)*L*0.5-8, y+Math.sin(a)*L*0.5-8, x+Math.cos(a)*L, y+Math.sin(a)*L);
+      c.quadraticCurveTo(x+Math.cos(a)*L*0.5-10, y+Math.sin(a)*L*0.5-10, x+Math.cos(a)*L, y+Math.sin(a)*L);
       c.stroke();
-      for(let k=1;k<7;k++){
-        const t=k/7, px=x+Math.cos(a)*L*t, py=y+Math.sin(a)*L*t;
+      for(let k=1;k<8;k++){
+        const t=k/8, px=x+Math.cos(a)*L*t, py=y+Math.sin(a)*L*t;
         c.beginPath(); c.moveTo(px,py);
-        c.lineTo(px+Math.cos(a+1.1)*L*0.20, py+Math.sin(a+1.1)*L*0.20); c.stroke();
+        c.lineTo(px+Math.cos(a+1.15)*L*0.22, py+Math.sin(a+1.15)*L*0.22); c.stroke();
       }
     }
-    P.grad([[0,'rgba(255,250,235,0.5)'],[1,'rgba(150,130,90,0.35)']],1.0);
-    P.grain(0.02);
+    P.filigree('#c8a44e', 6, 0.09);
+    if(P.part==='body') P.emblem('crest','#ffe9a8',0.72,0.50,0.20);
+    P.grain(0.018);
   },
   mods:{
     anim:'twirl', reloadStyle:'quick',
@@ -1855,7 +2197,6 @@ add({
       const gold = ModKit.metalMat('#e0be62',0.18,1.0);
       const light= ModKit.glowMat('#ffe9a8', 2.2);
       const st = sub('static'), fx = sub('fx');
-      /* wing vanes off the handguard */
       for(let s=-1;s<=1;s+=2){
         for(let i=0;i<4;i++){
           const f=i/3;
@@ -1872,8 +2213,8 @@ add({
       root.userData.coilLight=l;
     },
     tick(root,t){
-      if(root.userData.halo){ root.userData.halo.rotation.z = t*0.8; root.userData.halo.scale.setScalar(1+Math.sin(t*2.2)*0.06); }
-      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.8+Math.sin(t*2.5)*0.3;
+      if(root.userData.halo){ root.userData.halo.rotation.z = t*0.6; root.userData.halo.scale.setScalar(1+Math.sin(t*1.5)*0.05); }
+      if(root.userData.coilLight) root.userData.coilLight.intensity = 0.8+Math.sin(t*1.6)*0.25;
     }
   }
 });
@@ -1885,79 +2226,101 @@ add(simpleSkin({id:'hornet_default', name:'Bare Metal', weapon:'hornet', rarity:
   col:'#31353a', accentCol:'#202327'}));
 
 add(simpleSkin({id:'hornet_wasp', name:'Wasp', weapon:'hornet', rarity:'industrial',
-  col:'#f2c200', accentCol:'#1a1a1a', gripCol:'#222',
-  pattern:P=> P.stripes(['#141414','#f2c200'],7,0.45,1)}));
+  col:'#f2c200', accentCol:'#161616', gripCol:'#1e1e1e',
+  pattern:P=> P.stripes(['#141414','#f2c200'], 5, 0.45, 1)}));
 
 add(simpleSkin({id:'hornet_ashen', name:'Ashen', weapon:'hornet', rarity:'industrial',
-  col:'#4d5057', accentCol:'#2b2d31',
-  pattern:P=>{ P.splatter(['#33363b','#5f636b','#1f2126'],120,0.05); P.grain(0.07); }}));
+  col:'#4d5057', accentCol:'#292b2f',
+  pattern:P=>{ P.splatter(['#33363b','#5f636b','#1f2126'], 30, 0.10); P.grain(0.065); }}));
 
 add(simpleSkin({id:'hornet_bubblegum', name:'Bubblegum', weapon:'hornet', rarity:'milspec',
-  col:'#ff7ab8', accentCol:'#f2f2f5', gripCol:'#e05a97', roughMul:0.7,
-  pattern:P=>{ const c=P.c;
-    for(let i=0;i<26;i++){ c.fillStyle='rgba(255,255,255,0.5)'; c.beginPath();
-      c.arc(P.rnd()*P.w,P.rnd()*P.h,P.w*(0.02+P.rnd()*0.06),0,TAU); c.fill(); }
-    P.grad([[0,'rgba(255,255,255,0.4)'],[1,'rgba(180,40,110,0.3)']],0.9); }}));
+  col:'#ff7ab8', accentCol:'#f2f2f5', gripCol:'#dd5391', roughMul:0.62, gloss:0.3,
+  pattern:P=>{
+    const c=P.c;
+    for(let i=0;i<9;i++){ c.fillStyle='rgba(255,255,255,0.48)'; c.beginPath();
+      c.arc(P.rnd()*P.w,P.rnd()*P.h,P.w*(0.05+P.rnd()*0.10),0,TAU); c.fill(); }
+    P.fade(['rgba(255,255,255,0.35)','rgba(255,120,190,0)','rgba(170,30,105,0.35)'],0.9);
+    P.sheen(0.26);
+  }}));
 
 add(simpleSkin({id:'hornet_cobalt', name:'Cobalt', weapon:'hornet', rarity:'milspec',
-  col:'#1e4fa8', accentCol:'#122a52', metalOverride:0.7, roughMul:0.55, envBoost:1.5,
-  pattern:P=>{ P.brushed(0.14); P.grad([[0,'rgba(140,200,255,0.35)'],[1,'rgba(0,10,50,0.45)']],1.1); }}));
+  col:'#1e4fa8', accentCol:'#10254a', metalOverride:0.72, roughMul:0.5, envBoost:1.5,
+  pattern:P=>{
+    P.brushed(0.15);
+    P.fade(['rgba(150,205,255,0.34)','rgba(30,79,168,0)','rgba(0,8,40,0.48)'],1.1);
+    P.seam('#8fc6ff', 0.014, 0.34, false);
+  }}));
 
 add(simpleSkin({id:'hornet_glitchwave', name:'Glitchwave', weapon:'hornet', rarity:'restricted',
-  col:'#1b0b3a', accentCol:'#2a1150', gripCol:'#241045',
+  col:'#1b0b3a', accentCol:'#25104a', gripCol:'#1f0d40',
+  vfx:{tracer:{color:'#ff2fb2'}},
   pattern:P=>{
-    P.grad([[0,'#2b0d5c'],[0.5,'#7b2ff7'],[1,'#ff2d95']],1.1);
+    P.fade(['#2b0d5c','#7b2ff7','#ff2d95'], 1.1);
     const c=P.c;
-    for(let y=0;y<P.h;y+=6){ c.fillStyle='rgba(0,0,0,0.22)'; c.fillRect(0,y,P.w,2); }
-    for(let i=0;i<24;i++){ const y=P.rnd()*P.h, h=2+P.rnd()*12;
-      c.globalAlpha=0.55; c.fillStyle=pick(['#00f0ff','#ff2d95','#ffffff']);
-      c.fillRect(P.rnd()*P.w*0.5, y, P.w*(0.1+P.rnd()*0.5), h); }
+    for(let y=0;y<P.h;y+=10){ c.fillStyle='rgba(0,0,0,0.20)'; c.fillRect(0,y,P.w,3); }
+    for(let i=0;i<7;i++){                                    /* 7 fat glitch bars */
+      const y=P.rnd()*P.h, h=P.h*(0.02+P.rnd()*0.06);
+      c.globalAlpha=0.6; c.fillStyle=pick(['#00f0ff','#ff2d95','#ffffff']);
+      c.fillRect(P.rnd()*P.w*0.4, y, P.w*(0.25+P.rnd()*0.55), h);
+    }
     c.globalAlpha=1;
-    P.glyphs('#00f0ff',10);
+    P.stencil('ERR//','rgba(0,240,255,0.65)',0.14,0.06,0.86);
   }}));
 
 add(simpleSkin({id:'hornet_venom', name:'Venom', weapon:'hornet', rarity:'restricted',
-  col:'#101a12', accentCol:'#16241a', gripCol:'#122016',
-  emissive:'#43ff6a', emissiveKinds:['body'], emissiveIntensity:0.32,
+  col:'#0e1710', accentCol:'#142016', gripCol:'#111d14',
+  emissive:'#39ff6a', emissiveKinds:['body'], emissiveIntensity:0.30,
+  vfx:{tracer:{color:'#39ff6a'}},
   pattern:P=>{
-    P.blobs(['#1d3a24','#0c150f'],18,0.3,0.9);
+    P.blobs(['#1d3a24','#0a120d'], 6, 0.36, 0.9);
     const c=P.c;
-    for(let i=0;i<34;i++){
-      c.fillStyle='rgba(70,255,110,'+(0.35+P.rnd()*0.5)+')';
-      const x=P.rnd()*P.w, y=P.rnd()*P.h, r=P.w*(0.01+P.rnd()*0.035);
+    for(let i=0;i<11;i++){                                   /* 11 big drips */
+      c.fillStyle='rgba(57,255,106,'+(0.45+P.rnd()*0.5)+')';
+      const x=P.rnd()*P.w, y=P.rnd()*P.h*0.55, r=P.w*(0.020+P.rnd()*0.030);
       c.beginPath(); c.arc(x,y,r,0,TAU); c.fill();
-      c.beginPath(); c.moveTo(x,y);
-      c.quadraticCurveTo(x+r*0.4,y+r*3, x, y+r*(4+P.rnd()*6));
-      c.quadraticCurveTo(x-r*0.4,y+r*3, x,y); c.fill();
+      c.beginPath(); c.moveTo(x-r*0.5,y);
+      c.quadraticCurveTo(x+r*0.5, y+r*3.5, x, y+r*(5+P.rnd()*5));
+      c.quadraticCurveTo(x-r*0.5, y+r*3.5, x-r*0.5, y); c.fill();
     }
   }}));
 
+/* classified — painted gold hex chrome */
 add({
   id:'hornet_swarm', name:'Swarm', weapon:'hornet', rarity:'classified',
-  metalOverride:0.95, roughMul:0.3, envBoost:2.2, baseMetal:'#7d6a34',
+  metalOverride:0.48, roughMul:0.55, envBoost:1.05, baseMetal:'#7d6a34',
+  vfx:{
+    flash:{shape:'star', core:'#fff4cf', corona:'#f0cd55', coronaScale:1.8, light:'#ffd970'},
+    tracer:{color:'#ffd970', width:0.95}
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#2b2513'); return; }
-    P.fill('#141207');
-    P.hexCamo(['#d9a520','#8a6a12','#2a2410','#f0cd55'],26,1);
-    P.overlayMode('overlay', p=> p.grad([[0,'rgba(255,255,255,0.45)'],[0.5,'rgba(0,0,0,0.2)'],[1,'rgba(255,220,120,0.4)']],0.7));
-    P.brushed(0.06);
+    if(P.part==='grip'){ gripTexture(P,'#241f10'); return; }
+    P.chrome('#f0cd55','#4a3a10','#fffbe0',0.46,2);
+    P.overlayMode('multiply', p=> p.hexCamo(['#ffffff','#c9a83e','#7a6420'], p.w*0.19, 0.55));
+    P.seam('#fff0b0', 0.016, 0.26, false);
+    P.sheen(0.22);
   }
 });
 
+/* covert — living hive */
 add({
   id:'hornet_hivemind', name:'Hivemind', weapon:'hornet', rarity:'covert',
   emissive:'#ffb300', emissiveKinds:['accent','mag'], emissiveIntensity:1.3,
   metalOverride:0.75, roughMul:0.4, envBoost:2.0, baseMetal:'#33280d',
-  tracer:'#ffb300', flash:'#ffcc44',
+  vfx:{
+    flash:{shape:'bloom', core:'#fff0c0', corona:'#ffb300', coronaScale:1.9, light:'#ffb300', lightScale:1.1},
+    tracer:{color:'#ffb300', style:'ember', width:0.95},
+    impact:{color:'#ffcc44', burst:true, scale:0.9},
+    casingColor:'#d8a52e'
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#1a1508'); return; }
-    P.fill('#0d0b05');
-    P.hexCamo(['#191203','#241a06','#0f0b03'],22,1);
-    const c=P.c;                                   // glowing honeycomb seams
-    c.strokeStyle='#ffb300'; c.lineWidth=2.2; c.shadowColor='#ffb300'; c.shadowBlur=10;
-    const size=22, hgt=size*Math.sqrt(3)/2;
+    if(P.part==='grip'){ gripTexture(P,'#171205'); return; }
+    P.fill('#0c0a04');
+    P.hexCamo(['#191203','#241a06','#0f0b03'], P.w*0.17, 1);
+    const c=P.c;                                             /* glowing comb seams */
+    c.strokeStyle='#ffb300'; c.lineWidth=3.2; c.shadowColor='#ffb300'; c.shadowBlur=12;
+    const size=P.w*0.17, hgt=size*Math.sqrt(3)/2;
     for(let row=0;row*hgt<P.h+size;row++) for(let col=0;col*size*1.5<P.w+size;col++){
-      if(P.rnd()>0.35) continue;
+      if(P.rnd()>0.42) continue;
       const x=col*size*1.5, y=row*hgt+(col%2?hgt/2:0);
       c.beginPath();
       for(let i=0;i<6;i++){ const a=i*TAU/6; const px=x+Math.cos(a)*size*0.5, py=y+Math.sin(a)*size*0.5; i?c.lineTo(px,py):c.moveTo(px,py); }
@@ -1976,8 +2339,7 @@ add({
         const f=i/4;
         const plate = ModKit.box(0.05,0.012,0.052, shell, [0.24+f*0.16, 0.052-f*0.004, 0]);
         plate.rotation.z = -0.08; st.add(plate);
-        const seam = ModKit.box(0.05,0.004,0.056, glow, [0.24+f*0.16, 0.044-f*0.004, 0]);
-        fx.add(seam);
+        fx.add(ModKit.box(0.05,0.004,0.056, glow, [0.24+f*0.16, 0.044-f*0.004, 0]));
       }
       st.add(ModKit.tube(0.016,0.019,0.09, shell, [0.48,0.024,0]));
       const l=new THREE.PointLight(0xffb300,0.8,1.0); l.position.set(0.5,0.03,0); fx.add(l);
@@ -1985,26 +2347,34 @@ add({
     },
     tick(root,t){
       root.userData.groups.fx.children.forEach((c,i)=>{
-        if(c.material && c.material.emissiveIntensity!=null && c.isMesh)
-          c.material.emissiveIntensity = 1.8 + Math.sin(t*4 + i*0.9)*1.1;
+        if(c.isMesh && c.material.emissiveIntensity!=null)
+          c.material.emissiveIntensity = 1.9 + Math.sin(t*1.8 + i*0.8)*0.9;
       });
-      if(root.userData.coilLight) root.userData.coilLight.intensity=0.6+Math.sin(t*4)*0.35;
+      if(root.userData.coilLight) root.userData.coilLight.intensity=0.6+Math.sin(t*1.8)*0.3;
     }
   }
 });
 
+/* exotic — insectoid */
 add({
   id:'hornet_stinger', name:'Stinger', weapon:'hornet', rarity:'exotic',
-  metalOverride:0.85, roughMul:0.3, envBoost:2.5, baseMetal:'#2a3a1a',
+  metalOverride:0.50, roughMul:0.55, envBoost:1.15, baseMetal:'#2a3a1a',
   emissive:'#9dff3d', emissiveKinds:['accent'], emissiveIntensity:1.0, maxFloat:0.5,
-  tracer:'#9dff3d', flash:'#c8ff7a',
+  vfx:{
+    flash:{shape:'shard', core:'#e8ffc8', corona:'#9dff3d', coronaScale:1.9,
+           light:'#9dff3d', lightScale:1.2, sparks:5, sparkColor:'#c8ff7a'},
+    tracer:{color:'#9dff3d', style:'beam', width:0.85},
+    impact:{color:'#9dff3d', burst:true, scale:1.0},
+    casingColor:'#7aa62e'
+  },
   paint(P){
-    if(P.part==='grip'){ P.fill('#101806'); P.scales('#16240a','#2c4415',16); return; }
-    if(P.part==='accent'){ P.fill('#1a2a0c'); P.brushed(0.12); return; }
-    P.fill('#0b1105');
-    P.scales('#16240a','#3c6b1c', 20);
-    P.overlayMode('screen', p=> p.grad([[0,'rgba(160,255,60,0.35)'],[0.6,'rgba(0,0,0,0)'],[1,'rgba(220,255,120,0.3)']],0.9));
-    P.marble(['#9dff3d','#4d7a1a'],35);
+    if(P.part==='grip'){ P.fill('#0d1405'); P.scales('#132009','#2c4415', P.w*0.065); return; }
+    if(P.part==='accent'){ P.chrome('#2c4a16','#0d1405','#b8ff7a',0.48,1); return; }
+    P.fill('#0a1004');
+    P.scales('#132009','#3c6b1c', P.w*0.085);
+    P.overlayMode('screen', p=> p.fade(['rgba(160,255,60,0.34)','rgba(0,0,0,0)','rgba(220,255,120,0.28)'],0.9));
+    P.seam('#9dff3d', 0.020, 0.22);
+    if(P.part==='body') P.emblem('eye','#c8ff7a',0.70,0.52,0.16);
     P.vignette(0.5);
   },
   mods:{
@@ -2013,21 +2383,18 @@ add({
       const chitin = ModKit.metalMat('#26401a',0.30,0.9);
       const glow   = ModKit.glowMat('#9dff3d', 2.8);
       const st=sub('static'), fx=sub('fx');
-      /* carapace shroud replacing the polymer one */
       for(let i=0;i<4;i++){
         const f=i/3;
         const seg = ModKit.box(0.045,0.046-f*0.008,0.044-f*0.006, chitin, [0.26+f*0.05,0.024,0]);
         seg.rotation.z = 0.05*i; st.add(seg);
         fx.add(ModKit.box(0.045,0.004,0.048-f*0.006, glow, [0.26+f*0.05,0.048-f*0.005,0]));
       }
-      /* stinger barrel */
       st.add(ModKit.spike(0.014,0.14, chitin, [0.53,0.024,0]));
       fx.add(ModKit.tube(0.006,0.006,0.12, glow, [0.50,0.024,0]));
-      /* wings */
       for(let s=-1;s<=1;s+=2){
         const w = ModKit.blade(0.16,0.07,0.004, ModKit.glowMat('#9dff3d',0.9), [0.06,0.05,s*0.028]);
         w.rotation.z = 0.5; w.rotation.y = s*0.5;
-        w.material.transparent=true; w.material.opacity=0.55;
+        w.material.transparent=true; w.material.opacity=0.5;
         fx.add(w); w.userData.wing = s;
       }
       const l=new THREE.PointLight(0x9dff3d,1.0,1.2); l.position.set(0.5,0.03,0); fx.add(l);
@@ -2035,9 +2402,9 @@ add({
     },
     tick(root,t){
       root.userData.groups.fx.children.forEach(c=>{
-        if(c.userData.wing) c.rotation.z = 0.5 + Math.sin(t*16)*0.30*c.userData.wing;
+        if(c.userData.wing) c.rotation.z = 0.5 + Math.sin(t*7)*0.22*c.userData.wing;
       });
-      if(root.userData.coilLight) root.userData.coilLight.intensity=0.8+Math.sin(t*9)*0.4;
+      if(root.userData.coilLight) root.userData.coilLight.intensity=0.8+Math.sin(t*3.5)*0.3;
     }
   }
 });
@@ -2049,107 +2416,128 @@ add(simpleSkin({id:'reaper_default', name:'Marksman', weapon:'reaper', rarity:'c
   col:'#282b30', accentCol:'#1b1e22'}));
 
 add(simpleSkin({id:'reaper_woodland', name:'Woodland', weapon:'reaper', rarity:'industrial',
-  col:'#4a5537', accentCol:'#2a2f22',
-  pattern:P=>{ P.blobs(['#39412a','#6b7748','#22281a','#8b8f5e'],22,0.26,0.95); P.grain(0.06); }}));
+  col:'#4a5537', accentCol:'#282d20',
+  pattern:P=>{ P.blobs(['#39412a','#6b7748','#22281a','#8b8f5e'], 8, 0.32, 0.95); P.grain(0.055); }}));
 
 add(simpleSkin({id:'reaper_gunmetal', name:'Gunmetal', weapon:'reaper', rarity:'industrial',
-  col:'#43474e', accentCol:'#2c3036', metalOverride:0.8, roughMul:0.6, envBoost:1.4,
-  pattern:P=> P.brushed(0.16)}));
+  col:'#43474e', accentCol:'#2a2e34', metalOverride:0.8, roughMul:0.55, envBoost:1.4,
+  pattern:P=>{ P.brushed(0.17); P.panelLines('rgba(0,0,0,0.45)',3); }}));
 
 add(simpleSkin({id:'reaper_frostbite', name:'Frostbite', weapon:'reaper', rarity:'milspec',
-  col:'#cfe6f5', accentCol:'#2f4351', gripCol:'#3a4f5e', roughMul:0.6, envBoost:1.6,
+  col:'#cfe6f5', accentCol:'#2c3f4d', gripCol:'#374b59', roughMul:0.58, envBoost:1.6,
   pattern:P=>{
     const c=P.c;
-    for(let i=0;i<40;i++){
-      c.strokeStyle='rgba(255,255,255,'+(0.3+P.rnd()*0.5)+')'; c.lineWidth=1+P.rnd()*2;
-      const x=P.rnd()*P.w, y=P.rnd()*P.h;
+    for(let i=0;i<9;i++){                                    /* 9 big frost stars */
+      c.strokeStyle='rgba(255,255,255,'+(0.45+P.rnd()*0.5)+')'; c.lineWidth=2+P.rnd()*3;
+      const x=P.rnd()*P.w, y=P.rnd()*P.h, R=P.w*(0.10+P.rnd()*0.08);
       for(let k=0;k<6;k++){ const a=k*TAU/6;
-        c.beginPath(); c.moveTo(x,y); c.lineTo(x+Math.cos(a)*P.w*0.08,y+Math.sin(a)*P.w*0.08); c.stroke(); }
+        c.beginPath(); c.moveTo(x,y); c.lineTo(x+Math.cos(a)*R,y+Math.sin(a)*R); c.stroke();
+        c.beginPath();
+        c.moveTo(x+Math.cos(a)*R*0.6, y+Math.sin(a)*R*0.6);
+        c.lineTo(x+Math.cos(a+0.7)*R*0.85, y+Math.sin(a+0.7)*R*0.85); c.stroke();
+      }
     }
-    P.grad([[0,'rgba(180,225,255,0.5)'],[1,'rgba(60,110,150,0.4)']],1.0);
+    P.fade(['rgba(185,228,255,0.5)','rgba(207,230,245,0)','rgba(48,96,134,0.46)'],1.0);
   }}));
 
 add(simpleSkin({id:'reaper_ember', name:'Ember', weapon:'reaper', rarity:'milspec',
-  col:'#1a1310', accentCol:'#241a14', gripCol:'#1f1713',
-  emissive:'#ff5a10', emissiveKinds:['body'], emissiveIntensity:0.25,
+  col:'#171110', accentCol:'#211814', gripCol:'#1c1512',
+  emissive:'#ff5a10', emissiveKinds:['body'], emissiveIntensity:0.26,
   pattern:P=>{
-    P.blobs(['#0f0b09','#2a1a12'],16,0.3,0.9);
+    P.blobs(['#0d0908','#291810'], 6, 0.36, 0.9);
     const c=P.c;
-    for(let i=0;i<220;i++){
-      c.fillStyle='rgba('+randi(200,255)+','+randi(60,160)+',20,'+(0.25+P.rnd()*0.6)+')';
-      c.beginPath(); c.arc(P.rnd()*P.w,P.rnd()*P.h,P.w*0.003+P.rnd()*P.w*0.012,0,TAU); c.fill();
+    for(let i=0;i<64;i++){                                   /* fewer, bigger embers */
+      c.fillStyle='rgba('+randi(210,255)+','+randi(70,170)+',20,'+(0.35+P.rnd()*0.6)+')';
+      c.beginPath(); c.arc(P.rnd()*P.w,P.rnd()*P.h,P.w*0.005+P.rnd()*P.w*0.022,0,TAU); c.fill();
     }
+    P.seam('#ff5a10', 0.014, 0.78, false);
   }}));
 
 add(simpleSkin({id:'reaper_skyline', name:'Skyline', weapon:'reaper', rarity:'restricted',
-  col:'#f0f2f4', accentCol:'#1f2429', gripCol:'#2b3238', roughMul:0.5, envBoost:1.7,
+  col:'#f0f2f4', accentCol:'#1c2126', gripCol:'#272d33', roughMul:0.48, envBoost:1.7, gloss:0.22,
+  vfx:{tracer:{color:'#ff7a18'}},
   pattern:P=>{
     P.fill('#f0f2f4');
     const c=P.c;
     c.fillStyle='#ff6a00';
-    c.beginPath(); c.moveTo(0,P.h*0.55); c.lineTo(P.w,P.h*0.30); c.lineTo(P.w,P.h*0.52); c.lineTo(0,P.h*0.78); c.closePath(); c.fill();
+    c.beginPath(); c.moveTo(0,P.h*0.55); c.lineTo(P.w,P.h*0.28); c.lineTo(P.w,P.h*0.52); c.lineTo(0,P.h*0.80); c.closePath(); c.fill();
     c.fillStyle='#101418';
-    c.beginPath(); c.moveTo(0,P.h*0.80); c.lineTo(P.w,P.h*0.54); c.lineTo(P.w,P.h); c.lineTo(0,P.h); c.closePath(); c.fill();
-    c.fillStyle='rgba(255,255,255,0.6)';
-    for(let i=0;i<8;i++){ c.fillRect(P.rnd()*P.w, P.h*0.1+P.rnd()*P.h*0.15, P.w*0.02, P.h*0.04); }
-    P.grain(0.03);
+    c.beginPath(); c.moveTo(0,P.h*0.82); c.lineTo(P.w,P.h*0.54); c.lineTo(P.w,P.h); c.lineTo(0,P.h); c.closePath(); c.fill();
+    c.fillStyle='rgba(255,255,255,0.55)';
+    for(let i=0;i<5;i++) c.fillRect(P.rnd()*P.w, P.h*0.10+P.rnd()*P.h*0.12, P.w*0.035, P.h*0.055);
+    P.sheen(0.16);
   }}));
 
 add(simpleSkin({id:'reaper_carbon', name:'Carbon Weave', weapon:'reaper', rarity:'restricted',
-  col:'#131316', accentCol:'#1a1a1e', metalOverride:0.6, roughMul:0.45, envBoost:1.8,
+  col:'#131316', accentCol:'#1a1a1e', metalOverride:0.58, roughMul:0.42, envBoost:1.8,
+  vfx:{tracer:{color:'#8fc6ff'}},
   pattern:P=>{
-    const c=P.c;
-    for(let y=0;y<P.h;y+=10) for(let x=0;x<P.w;x+=10){
-      c.fillStyle = ((x/10+y/10)%2)? '#1e1e23':'#101013';
-      c.fillRect(x,y,10,10);
-      c.fillStyle='rgba(255,255,255,0.07)'; c.fillRect(x,y,10,2);
-      c.fillStyle='rgba(0,0,0,0.25)'; c.fillRect(x,y+8,10,2);
+    const c=P.c, q=P.w/16;
+    for(let y=0;y<P.h;y+=q) for(let x=0;x<P.w;x+=q){
+      c.fillStyle = ((x/q+y/q)%2)? '#1e1e24':'#0f0f12';
+      c.fillRect(x,y,q,q);
+      c.fillStyle='rgba(255,255,255,0.07)'; c.fillRect(x,y,q,q*0.2);
+      c.fillStyle='rgba(0,0,0,0.28)'; c.fillRect(x,y+q*0.8,q,q*0.2);
     }
-    P.grad([[0,'rgba(120,160,200,0.16)'],[1,'rgba(0,0,0,0.35)']],0.8);
+    P.fade(['rgba(130,175,220,0.20)','rgba(0,0,0,0.15)','rgba(0,0,0,0.42)'],0.8);
+    P.seam('#5f9fd6', 0.010, 0.34, false);
   }}));
 
+/* classified — arcane glyph optics */
 add({
   id:'reaper_oracle', name:'Oracle', weapon:'reaper', rarity:'classified',
   emissive:'#39d7ff', emissiveKinds:['body','accent'], emissiveIntensity:0.6,
   metalOverride:0.6, roughMul:0.4, envBoost:2.0, baseMetal:'#1b2833',
+  vfx:{
+    flash:{shape:'ring', core:'#e0f8ff', corona:'#39d7ff', coronaScale:2.0, light:'#39d7ff'},
+    tracer:{color:'#39d7ff', style:'beam', width:0.85}
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#12202a'); return; }
-    P.fill('#071119');
-    P.radial('rgba(20,90,140,0.6)','rgba(0,0,0,0)',0.5,0.5,0.7);
+    if(P.part==='grip'){ gripTexture(P,'#101d26'); return; }
+    P.fill('#061019');
+    P.radial('rgba(18,80,128,0.6)','rgba(0,0,0,0)',0.5,0.5,0.78);
     const c=P.c;
-    c.strokeStyle='#39d7ff'; c.shadowColor='#39d7ff'; c.shadowBlur=8;
-    for(let i=0;i<5;i++){
-      const x=P.rnd()*P.w, y=P.rnd()*P.h, r=P.w*(0.08+P.rnd()*0.16);
-      c.lineWidth=1.6; c.beginPath(); c.arc(x,y,r,0,TAU); c.stroke();
-      c.beginPath(); c.arc(x,y,r*0.62,0,TAU); c.stroke();
+    c.strokeStyle='#39d7ff'; c.shadowColor='#39d7ff'; c.shadowBlur=10;
+    for(let i=0;i<2;i++){                                    /* two big sigils only */
+      const x=P.w*(0.28+i*0.44), y=P.h*(0.35+P.rnd()*0.3), r=P.w*(0.17+P.rnd()*0.07);
+      c.lineWidth=2.2; c.beginPath(); c.arc(x,y,r,0,TAU); c.stroke();
+      c.beginPath(); c.arc(x,y,r*0.60,0,TAU); c.stroke();
       for(let k=0;k<8;k++){ const a=k*TAU/8;
-        c.beginPath(); c.moveTo(x+Math.cos(a)*r*0.62,y+Math.sin(a)*r*0.62);
+        c.beginPath(); c.moveTo(x+Math.cos(a)*r*0.60,y+Math.sin(a)*r*0.60);
         c.lineTo(x+Math.cos(a)*r,y+Math.sin(a)*r); c.stroke(); }
     }
     c.shadowBlur=0;
-    P.glyphs('#8fe9ff',18,'ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ');
+    P.glyphs('#8fe9ff', 7, 'ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡΣΤΥΦΧΨΩ');
+    P.seam('#39d7ff', 0.014, 0.20);
     P.vignette(0.55);
   }
 });
 
+/* covert — event horizon */
 add({
   id:'reaper_singularity', name:'Singularity', weapon:'reaper', rarity:'covert',
   emissive:'#4aa8ff', emissiveKinds:['accent'], emissiveIntensity:1.2,
   metalOverride:0.9, roughMul:0.3, envBoost:2.4, baseMetal:'#141820',
-  tracer:'#4aa8ff', flash:'#8ecbff',
+  vfx:{
+    flash:{shape:'void', core:'#bfe4ff', corona:'#4aa8ff', coronaScale:2.3, coronaAlpha:0.85,
+           light:'#4aa8ff', lightScale:1.3},
+    tracer:{color:'#4aa8ff', style:'void', width:1.2},
+    impact:{color:'#8ecbff', burst:true, scale:1.15},
+    casingColor:'#3f6f9c'
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#0c1016'); return; }
-    P.fill('#04060a');
+    if(P.part==='grip'){ gripTexture(P,'#0b0f15'); return; }
+    P.fill('#03050a');
     const c=P.c;
-    const g=c.createRadialGradient(P.w*0.45,P.h*0.5,0,P.w*0.45,P.h*0.5,P.w*0.55);
-    g.addColorStop(0,'#000'); g.addColorStop(0.42,'#000');
-    g.addColorStop(0.5,'#4aa8ff'); g.addColorStop(0.62,'#1b3f77'); g.addColorStop(1,'rgba(0,0,0,0)');
+    const g=c.createRadialGradient(P.w*0.44,P.h*0.5,0,P.w*0.44,P.h*0.5,P.w*0.56);
+    g.addColorStop(0,'#000'); g.addColorStop(0.40,'#000');
+    g.addColorStop(0.485,'#8ed6ff'); g.addColorStop(0.53,'#4aa8ff');
+    g.addColorStop(0.68,'#16345f'); g.addColorStop(1,'rgba(0,0,0,0)');
     c.fillStyle=g; c.fillRect(0,0,P.w,P.h);
-    for(let i=0;i<300;i++){
-      c.fillStyle='rgba(255,255,255,'+(0.15+P.rnd()*0.7)+')';
-      c.beginPath(); c.arc(P.rnd()*P.w,P.rnd()*P.h,P.rnd()*1.5+0.3,0,TAU); c.fill();
-    }
-    P.marble(['#2b5fa8','#7fc4ff'],28);
+    P.specks('#ffffff', 180, 1.7);
+    P.marble(['#2b5fa8','#7fc4ff'], 10);
+    P.seam('#8ed6ff', 0.012, 0.14);
+    P.vignette(0.35);
   },
   mods:{
     anim:'flourish',
@@ -2159,7 +2547,7 @@ add({
       const st=sub('static'), fx=sub('fx');
       const ring = ModKit.torus(0.070,0.005, glow, [0.30,0.018,0]);
       const ring2= ModKit.torus(0.095,0.003, glow, [0.30,0.018,0]);
-      ring.userData.spin=0.9; ring2.userData.spin=-0.55;
+      ring.userData.spin=0.8; ring2.userData.spin=-0.45;
       fx.add(ring,ring2);
       const core = new THREE.Mesh(new THREE.SphereGeometry(0.020,18,14), new THREE.MeshBasicMaterial({color:0x000000}));
       core.position.set(0.30,0.018,0); st.add(core);
@@ -2172,34 +2560,42 @@ add({
     },
     tick(root,t){
       root.userData.groups.fx.children.forEach(c=>{
-        if(c.userData.spin){ c.rotation.z=t*c.userData.spin; c.rotation.y=Math.PI/2+Math.sin(t*0.6)*0.6; }
+        if(c.userData.spin){ c.rotation.z=t*c.userData.spin; c.rotation.y=Math.PI/2+Math.sin(t*0.4)*0.5; }
       });
-      if(root.userData.orb) root.userData.orb.scale.setScalar(1+Math.sin(t*3.4)*0.16);
-      if(root.userData.coilLight) root.userData.coilLight.intensity=0.9+Math.sin(t*3.4)*0.4;
+      if(root.userData.orb) root.userData.orb.scale.setScalar(1+Math.sin(t*1.9)*0.12);
+      if(root.userData.coilLight) root.userData.coilLight.intensity=0.9+Math.sin(t*1.9)*0.3;
     }
   }
 });
 
+/* exotic — directed energy */
 add({
   id:'reaper_lightlance', name:'Lightlance', weapon:'reaper', rarity:'exotic',
-  metalOverride:0.95, roughMul:0.18, envBoost:3.0, baseMetal:'#c8d8e8',
+  metalOverride:0.42, roughMul:0.55, envBoost:0.95, baseMetal:'#c8d8e8',
   emissive:'#e8faff', emissiveKinds:['accent'], emissiveIntensity:1.2, maxFloat:0.45,
-  tracer:'#d8f4ff', flash:'#ffffff',
+  vfx:{
+    flash:{shape:'shard', core:'#ffffff', corona:'#7fd4ff', coronaScale:2.2, coronaShape:'ring',
+           light:'#cfefff', lightScale:1.5, sparks:5, sparkColor:'#cfefff'},
+    tracer:{color:'#cfefff', style:'beam', width:1.4},
+    impact:{color:'#cfefff', burst:true, scale:1.4},
+    casing:false
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#1b2430'); return; }
-    if(P.part==='accent'){ P.fill('#dfe9f3'); P.brushed(0.10); return; }
-    P.fill('#eef4fa');
-    P.overlayMode('multiply', p=> p.grad([[0,'rgba(255,255,255,1)'],[0.55,'rgba(190,215,240,1)'],[1,'rgba(120,160,205,1)']],0.9));
+    if(P.part==='grip'){ gripTexture(P,'#18212c'); return; }
+    if(P.part==='accent'){ P.chrome('#ffffff','#5f7d99','#ffffff',0.46,3); return; }
+    P.chrome('#f4f9ff','#93b4d2','#ffffff',0.44,2);
     const c=P.c;
-    c.strokeStyle='rgba(60,170,235,0.85)'; c.lineWidth=2.4;
-    for(let i=0;i<10;i++){
+    c.strokeStyle='rgba(60,170,235,0.8)'; c.lineWidth=3;
+    for(let i=0;i<4;i++){
       const y=P.rnd()*P.h;
       c.beginPath(); c.moveTo(0,y);
-      for(let x=0;x<P.w;x+=P.w/8) c.lineTo(x, y+(P.rnd()-0.5)*22);
+      for(let x=0;x<P.w;x+=P.w/6) c.lineTo(x, y+(P.rnd()-0.5)*26);
       c.stroke();
     }
-    P.circuit('rgba(140,215,255,0.9)','#7fd4ff',10);
-    P.grain(0.02);
+    P.circuit('rgba(140,215,255,0.9)','#7fd4ff', 7);
+    P.seam('#7fd4ff', 0.016, 0.24);
+    if(P.part==='body') P.emblem('bolt','#7fd4ff',0.70,0.50,0.18);
+    P.grain(0.015);
   },
   mods:{
     anim:'spin', reloadStyle:'quick', hide:['bipod','muzzle'],
@@ -2207,11 +2603,9 @@ add({
       const chrome = ModKit.metalMat('#e8f0f8',0.10,1.0);
       const beam   = ModKit.glowMat('#cfefff', 2.0);
       const st=sub('static'), fx=sub('fx');
-      /* barrel replaced with an emitter cage */
       for(let i=0;i<6;i++){
         const f=i/5;
-        const r = ModKit.torus(0.024-f*0.006,0.004, chrome, [0.62+f*0.16, 0.018, 0]);
-        st.add(r);
+        st.add(ModKit.torus(0.024-f*0.006,0.004, chrome, [0.62+f*0.16, 0.018, 0]));
       }
       const lance = ModKit.tube(0.008,0.004,0.44, beam, [0.78,0.018,0]);
       lance.material.transparent=true; lance.material.opacity=0.9;
@@ -2226,10 +2620,10 @@ add({
     },
     tick(root,t){
       if(root.userData.core){
-        root.userData.core.material.emissiveIntensity = 1.7+Math.sin(t*8)*0.8;
-        root.userData.core.scale.set(1,1,1+Math.sin(t*8)*0.10);
+        root.userData.core.material.emissiveIntensity = 1.7+Math.sin(t*3.2)*0.6;
+        root.userData.core.scale.set(1,1,1+Math.sin(t*3.2)*0.07);
       }
-      if(root.userData.coilLight) root.userData.coilLight.intensity=1.1+Math.sin(t*8)*0.5;
+      if(root.userData.coilLight) root.userData.coilLight.intensity=1.1+Math.sin(t*3.2)*0.35;
     }
   }
 });
@@ -2241,86 +2635,93 @@ add(simpleSkin({id:'sidewinder_default', name:'Service', weapon:'sidewinder', ra
   col:'#2c2f34', accentCol:'#1c1f23'}));
 
 add(simpleSkin({id:'sidewinder_nickel', name:'Nickel', weapon:'sidewinder', rarity:'industrial',
-  col:'#c9ced6', accentCol:'#8b9099', metalOverride:1.0, roughMul:0.35, envBoost:2.2,
-  pattern:P=> P.brushed(0.13)}));
+  col:'#c9ced6', accentCol:'#878d96', metalOverride:0.45, roughMul:0.55, envBoost:1.0,
+  pattern:P=>{ P.chrome('#eef3f8','#7b838d','#ffffff',0.48,2); P.brushed(0.09); }}));
 
 add(simpleSkin({id:'sidewinder_desert', name:'Desert Fox', weapon:'sidewinder', rarity:'industrial',
-  col:'#c2a878', accentCol:'#4a4132', gripCol:'#4f4535',
-  pattern:P=>{ P.blobs(['#a89066','#8b7550','#d9c298'],14,0.24,0.85); P.grain(0.05); }}));
+  col:'#c2a878', accentCol:'#463d2f', gripCol:'#4a4133',
+  pattern:P=>{ P.blobs(['#a89066','#8b7550','#d9c298'], 6, 0.32, 0.88); P.grain(0.045); }}));
 
 add(simpleSkin({id:'sidewinder_royal', name:'Royal Guard', weapon:'sidewinder', rarity:'milspec',
-  col:'#16305e', accentCol:'#c9a94a', gripCol:'#0f2145', metalOverride:0.75, roughMul:0.45, envBoost:1.8,
+  col:'#16305e', accentCol:'#c9a94a', gripCol:'#0d1e3f', metalOverride:0.72, roughMul:0.42, envBoost:1.8,
   pattern:P=>{
-    const c=P.c;
-    c.strokeStyle='rgba(215,180,90,0.85)'; c.lineWidth=2;
-    for(let i=0;i<24;i++){
-      const x=P.rnd()*P.w,y=P.rnd()*P.h,r=P.w*(0.03+P.rnd()*0.08);
-      c.beginPath();
-      for(let k=0;k<=24;k++){ const a=k/24*TAU; const rr=r*(1+0.4*Math.sin(a*5));
-        k? c.lineTo(x+Math.cos(a)*rr,y+Math.sin(a)*rr): c.moveTo(x+Math.cos(a)*rr,y+Math.sin(a)*rr); }
-      c.stroke();
-    }
-    P.grad([[0,'rgba(120,170,255,0.25)'],[1,'rgba(0,10,40,0.45)']],1.0);
+    P.fade(['#1d3f78','#16305e','#08142c'], 1.0);
+    P.filigree('rgba(215,180,90,0.9)', 5, 0.11);
+    P.seam('#d7b45a', 0.012, 0.30, false);
   }}));
 
 add(simpleSkin({id:'sidewinder_bloodline', name:'Bloodline', weapon:'sidewinder', rarity:'milspec',
-  col:'#1b0f10', accentCol:'#2a1416', gripCol:'#201214',
+  col:'#1b0f10', accentCol:'#281416', gripCol:'#1e1214',
   pattern:P=>{
-    P.marble(['#8e1b22','#c9333a','#3a0d10'],80);
+    P.caseHardened(['#170c0d','#8e1b22','#c9333a','#3a0d10'], 9);
     P.overlayMode('multiply', p=> p.vignette(0.55));
+    P.sheen(0.14);
   }}));
 
 add(simpleSkin({id:'sidewinder_deco', name:'Deco', weapon:'sidewinder', rarity:'restricted',
-  col:'#101014', accentCol:'#d4af37', gripCol:'#171720', metalOverride:0.85, roughMul:0.3, envBoost:2.4,
+  col:'#0f0f13', accentCol:'#d4af37', gripCol:'#16161e', metalOverride:0.82, roughMul:0.28, envBoost:2.4,
+  vfx:{tracer:{color:'#ffd970'}},
   pattern:P=>{
     const c=P.c;
-    c.strokeStyle='#d4af37'; c.lineWidth=3;
-    for(let i=0;i<7;i++){
-      const y = P.h*(i/7)+8;
+    c.strokeStyle='#d4af37'; c.lineWidth=4;
+    for(let i=0;i<4;i++){                                    /* 4 big chevron courses */
+      const y = P.h*(i/4)+12;
       c.beginPath();
-      for(let x=0;x<=P.w;x+=P.w/12){
-        c.lineTo(x, y + ((x/(P.w/12))%2? 18:-18));
-      }
+      for(let x=0;x<=P.w;x+=P.w/6) c.lineTo(x, y + ((x/(P.w/6))%2? 24:-24));
       c.stroke();
     }
-    c.fillStyle='rgba(212,175,55,0.28)';
-    for(let i=0;i<12;i++){ c.beginPath();
-      const x=P.rnd()*P.w,y=P.rnd()*P.h,r=P.w*0.05;
+    c.fillStyle='rgba(212,175,55,0.3)';
+    for(let i=0;i<5;i++){ c.beginPath();
+      const x=P.rnd()*P.w,y=P.rnd()*P.h,r=P.w*0.085;
       c.moveTo(x,y-r); c.lineTo(x+r,y); c.lineTo(x,y+r); c.lineTo(x-r,y); c.closePath(); c.fill(); }
+    P.sheen(0.2);
   }}));
 
+/* classified — neon city */
 add({
   id:'sidewinder_cyberpunk', name:'Neon District', weapon:'sidewinder', rarity:'classified',
   emissive:'#ff2fb0', emissiveKinds:['body','accent'], emissiveIntensity:0.75,
   metalOverride:0.7, roughMul:0.32, envBoost:2.2, baseMetal:'#20182a',
+  vfx:{
+    flash:{shape:'star', core:'#ffd8f2', corona:'#ff2fb0', coronaScale:1.9, light:'#ff2fb0'},
+    tracer:{color:'#00e5ff', width:0.85}
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#160f1e'); return; }
-    P.fill('#0a0713');
-    P.grad([[0,'rgba(255,47,176,0.35)'],[0.5,'rgba(0,0,0,0)'],[1,'rgba(0,240,255,0.35)']],1.1);
-    P.circuit('#00f0ff','#00f0ff',16);
-    P.circuit('#ff2fb0','#ff2fb0',12);
-    P.glyphs('#00f0ff',14,'ネオンサイバー01');
+    if(P.part==='grip'){ gripTexture(P,'#150e1c'); return; }
+    P.fill('#08060f');
+    P.fade(['rgba(255,47,176,0.34)','rgba(0,0,0,0)','rgba(0,229,255,0.34)'], 1.1);
+    P.circuit('#00e5ff','#00e5ff', 7);
+    P.circuit('#ff2fb0','#ff2fb0', 5);
+    P.seam('#00e5ff', 0.016, 0.24);
+    P.stencil('ネオン','rgba(0,229,255,0.7)',0.16,0.06,0.88);
     P.vignette(0.5);
   }
 });
 
+/* covert — hard light */
 add({
   id:'sidewinder_phantom', name:'Phantom', weapon:'sidewinder', rarity:'covert',
   emissive:'#7ef9ff', emissiveKinds:['accent','mag','body'], emissiveIntensity:0.9,
   metalOverride:0.4, roughMul:0.25, envBoost:2.6, baseMetal:'#1c2a30',
-  tracer:'#7ef9ff', flash:'#c6feff',
+  vfx:{
+    flash:{shape:'ring', core:'#e8ffff', corona:'#7ef9ff', coronaScale:2.0, light:'#7ef9ff', lightScale:1.1},
+    tracer:{color:'#7ef9ff', style:'beam', width:0.9},
+    impact:{color:'#7ef9ff', burst:true, scale:0.85},
+    casingColor:'#5fc9d6'
+  },
   paint(P){
-    if(P.part==='grip'){ gripTexture(P,'#0e1a1e'); return; }
-    P.fill('#050c10');
-    P.radial('rgba(60,200,220,0.45)','rgba(0,0,0,0)',0.5,0.5,0.7);
+    if(P.part==='grip'){ gripTexture(P,'#0d181c'); return; }
+    P.fill('#040a0e');
+    P.radial('rgba(50,190,210,0.42)','rgba(0,0,0,0)',0.5,0.5,0.78);
     const c=P.c;
-    for(let i=0;i<26;i++){
-      c.strokeStyle='rgba(126,249,255,'+(0.2+P.rnd()*0.6)+')'; c.lineWidth=1+P.rnd()*2.5;
+    for(let i=0;i<8;i++){                                    /* 8 wide scan bands */
+      c.strokeStyle='rgba(126,249,255,'+(0.25+P.rnd()*0.6)+')'; c.lineWidth=2+P.rnd()*4;
       const y=P.rnd()*P.h; c.beginPath(); c.moveTo(0,y);
-      for(let x=0;x<P.w;x+=P.w/10) c.lineTo(x, y+(P.rnd()-0.5)*26);
+      for(let x=0;x<P.w;x+=P.w/6) c.lineTo(x, y+(P.rnd()-0.5)*30);
       c.stroke();
     }
-    P.glyphs('#7ef9ff',10);
+    P.seam('#7ef9ff', 0.018, 0.20);
+    if(P.part==='body') P.emblem('ring','#7ef9ff',0.70,0.52,0.16);
     P.vignette(0.6);
   },
   mods:{
@@ -2339,46 +2740,54 @@ add({
       root.userData.coilLight=l;
     },
     tick(root,t){
-      if(root.userData.coilLight) root.userData.coilLight.intensity=0.5+Math.sin(t*5)*0.3;
+      if(root.userData.coilLight) root.userData.coilLight.intensity=0.5+Math.sin(t*2.4)*0.22;
       root.userData.groups.fx.children.forEach(c=>{ if(c.isMesh && c.material.emissiveIntensity!=null)
-        c.material.emissiveIntensity = 2.0+Math.sin(t*5)*0.9; });
+        c.material.emissiveIntensity = 2.0+Math.sin(t*2.4)*0.7; });
     }
   }
 });
 
+/* exotic — regalia */
 add({
   id:'sidewinder_kingsransom', name:"King's Ransom", weapon:'sidewinder', rarity:'exotic',
-  metalOverride:1.0, roughMul:0.15, envBoost:3.2, baseMetal:'#8a6d1e',
+  metalOverride:0.45, roughMul:0.58, envBoost:0.95, baseMetal:'#8a6d1e',
   emissive:'#ffd970', emissiveKinds:[], emissiveIntensity:0.4, maxFloat:0.45,
-  tracer:'#ffd970', flash:'#ffe9a8',
+  vfx:{
+    flash:{shape:'bloom', core:'#fff6d8', corona:'#ffd970', coronaScale:2.0,
+           light:'#ffe9a8', lightScale:1.25, sparks:8, sparkColor:'#ffd970'},
+    tracer:{color:'#ffd970', style:'holy', width:1.0},
+    impact:{color:'#ffd970', burst:true, scale:1.1},
+    casingColor:'#ffdf8a'
+  },
   paint(P){
-    if(P.part==='grip'){ P.fill('#2a1408'); P.marble(['#5a2c10','#8a4a1c'],50); return; }
-    P.fill('#a8801e');
-    P.overlayMode('screen', p=> p.grad([[0,'rgba(255,235,165,0.42)'],[0.45,'rgba(255,200,60,0.06)'],[1,'rgba(90,58,0,0.55)']],0.8));
+    if(P.part==='grip'){ P.fill('#26120a'); P.marble(['#5a2c10','#8a4a1c'], 18); return; }
+    P.chrome('#ffe9a0','#6b4a0c','#fffbe8', 0.45, 3);        /* painted gold, not lit gold */
     const c=P.c;
-    c.strokeStyle='rgba(90,60,0,0.85)'; c.lineWidth=2.2;   // scroll engraving
-    for(let i=0;i<26;i++){
-      const x=P.rnd()*P.w, y=P.rnd()*P.h, r=P.w*(0.04+P.rnd()*0.09);
+    c.strokeStyle='rgba(84,56,0,0.85)'; c.lineWidth=2.6;     /* scroll engraving */
+    for(let i=0;i<9;i++){
+      const x=P.rnd()*P.w, y=P.rnd()*P.h, r=P.w*(0.07+P.rnd()*0.09);
       c.beginPath();
-      for(let k=0;k<=30;k++){ const a=k/30*TAU*1.4, rr=r*(k/30);
+      for(let k=0;k<=30;k++){
+        const a=k/30*TAU*1.4, rr=r*(k/30);
         const px=x+Math.cos(a)*rr, py=y+Math.sin(a)*rr;
-        k? c.lineTo(px,py): c.moveTo(px,py); }
+        k? c.lineTo(px,py): c.moveTo(px,py);
+      }
       c.stroke();
     }
-    c.strokeStyle='rgba(255,250,220,0.5)'; c.lineWidth=1;
-    for(let i=0;i<40;i++){ const x=P.rnd()*P.w,y=P.rnd()*P.h;
-      c.beginPath(); c.arc(x,y,P.w*(0.01+P.rnd()*0.03),0,TAU); c.stroke(); }
-    P.grain(0.02);
+    P.filigree('#fff0b8', 7, 0.085);
+    if(P.part==='body') P.emblem('crest','#fff3c8',0.70,0.50,0.20);
+    P.sheen(0.24);
+    P.grain(0.015);
   },
   mods:{
     anim:'twirl', reloadStyle:'toss',
     build(root, sub){
       const gold = ModKit.metalMat('#e6c04e',0.12,1.0);
       const gem  = new THREE.MeshPhysicalMaterial({
-        color:0xd8203a, metalness:0.0, roughness:0.02, transmission:0.0,
+        color:0xb8102a, metalness:0.0, roughness:0.02,
         emissive:new THREE.Color('#c4102c'), emissiveIntensity:0.30, clearcoat:1, envMapIntensity:1.3
       });
-      const st=sub('static'), fx=sub('fx');
+      const st=sub('static');
       st.add(ModKit.box(0.27,0.008,0.040, gold, [0.02,0.082,0]));
       st.add(ModKit.spike(0.016,0.05, gold, [0.185,0.044,0]));
       const stone = new THREE.Mesh(new THREE.OctahedronGeometry(0.017,0), gem);
@@ -2387,9 +2796,7 @@ add({
       root.userData.orb = stone;
       for(let i=0;i<3;i++) st.add(ModKit.torus(0.013,0.003, gold, [0.06+i*0.035, 0.043,0]));
     },
-    tick(root,t){
-      if(root.userData.orb) root.userData.orb.rotation.y = t*1.4;
-    }
+    tick(root,t){ if(root.userData.orb) root.userData.orb.rotation.y = t*0.9; }
   }
 });
 
@@ -2630,6 +3037,10 @@ const Scene = {
     R.setPixelRatio(Math.min(devicePixelRatio,2));
     R.shadowMap.enabled = true;
     R.shadowMap.type = THREE.PCFSoftShadowMap;
+    /* the scene is static apart from targets, which drift slowly —
+       refreshing the map every other frame is indistinguishable */
+    R.shadowMap.autoUpdate = false;
+    this._shadowTick = 0;
     R.toneMapping = THREE.NoToneMapping;      /* done in the composite pass */
     R.outputEncoding = THREE.sRGBEncoding;
 
@@ -2679,26 +3090,31 @@ const Scene = {
     key.position.set(-8, 16, 6);
     key.castShadow = true;
     key.shadow.mapSize.set(1536,1536);
-    const d = 26;
+    const d = 30;
     key.shadow.camera.left=-d; key.shadow.camera.right=d;
     key.shadow.camera.top=d; key.shadow.camera.bottom=-d;
-    key.shadow.camera.near=1; key.shadow.camera.far=70;
+    key.shadow.camera.near=1; key.shadow.camera.far=80;
     key.shadow.bias = -0.0009;
     S.add(key); this.keyLight = key;
 
     const rim = new THREE.DirectionalLight(0x5aa8ff, 0.26);
     rim.position.set(9,7,-14); S.add(rim);
 
-    /* practical strip lights down the lane */
+    /* Practical strip lights. Every MeshStandardMaterial fragment loops
+       over EVERY point light in the scene, so the count is a real cost:
+       four wide lights cover the lane as evenly as eight narrow ones.
+       The emissive bulbs stay one-per-10m, so the look is unchanged. */
     for(let i=0;i<8;i++){
-      const p = new THREE.PointLight(0xffe9c4, 0.62, 26, 2);
-      p.position.set(0, 5.2, -6 - i*10);
-      S.add(p);
+      const z = -6 - i*10;
       const bulb = new THREE.Mesh(
         new THREE.BoxGeometry(3.2,0.10,0.34),
         new THREE.MeshBasicMaterial({color:0xd8cfbc})
       );
-      bulb.position.copy(p.position); S.add(bulb);
+      bulb.position.set(0,5.2,z); S.add(bulb);
+      if(i % 2) continue;
+      const p = new THREE.PointLight(0xffe9c4, 0.53, 40, 2);
+      p.position.set(0, 5.2, z - 5);
+      S.add(p);
     }
   },
 
@@ -2755,6 +3171,7 @@ const Scene = {
 
   buildRange(){
     const S = this.scene;
+    this.solids = [];   /* what bullets may actually hit */
     const concrete = this.surfTex('concrete',512,[14,26]);
     const panel = this.surfTex('panel',512,[8,3]);
     const rubber = this.surfTex('rubber',256,[6,6]);
@@ -2764,7 +3181,7 @@ const Scene = {
       new THREE.MeshStandardMaterial({map:concrete, roughness:0.93, metalness:0.02, envMapIntensity:0.22})
     );
     floor.rotation.x = -Math.PI/2; floor.position.z = -50;
-    floor.receiveShadow = true; S.add(floor);
+    floor.receiveShadow = true; S.add(floor); this.solids.push(floor);
 
     const ceil = new THREE.Mesh(
       new THREE.PlaneGeometry(40,120),
@@ -2776,7 +3193,8 @@ const Scene = {
     const wallMat = new THREE.MeshStandardMaterial({map:panel, roughness:0.74, metalness:0.30, envMapIntensity:0.45});
     const mkWall=(w,h,d,x,y,z)=>{
       const m = new THREE.Mesh(new THREE.BoxGeometry(w,h,d), wallMat);
-      m.position.set(x,y,z); m.castShadow=true; m.receiveShadow=true; S.add(m); return m;
+      m.position.set(x,y,z); m.castShadow=true; m.receiveShadow=true; S.add(m);
+      this.solids.push(m); return m;
     };
     mkWall(0.6,6.4,120,-13,3.2,-46);
     mkWall(0.6,6.4,120, 13,3.2,-46);
@@ -2788,7 +3206,7 @@ const Scene = {
     for(let i=0;i<9;i++){
       const b = new THREE.Mesh(new THREE.BoxGeometry(2.6,4.2,0.9), backMat);
       b.position.set(-10.4+i*2.6, 2.1, -101);
-      b.castShadow=b.receiveShadow=true; S.add(b);
+      b.castShadow=b.receiveShadow=true; S.add(b); this.solids.push(b);
     }
 
     /* firing line booth */
@@ -2796,12 +3214,12 @@ const Scene = {
     for(let i=-2;i<=2;i++){
       if(i===0) continue;
       const d = new THREE.Mesh(new THREE.BoxGeometry(0.12,1.55,2.0), boothMat);
-      d.position.set(i*2.6, 0.78, 2.4); d.castShadow=true; S.add(d);
+      d.position.set(i*2.6, 0.78, 2.4); d.castShadow=true; S.add(d); this.solids.push(d);
     }
     for(let i=-2;i<=2;i++){
       if(i===0) continue;
       const bench = new THREE.Mesh(new THREE.BoxGeometry(2.3,0.09,0.55), boothMat);
-      bench.position.set(i*2.6, 0.95, 1.9); bench.castShadow=true; S.add(bench);
+      bench.position.set(i*2.6, 0.95, 1.9); bench.castShadow=true; S.add(bench); this.solids.push(bench);
     }
 
     /* hazard stripe on the firing line */
@@ -2830,9 +3248,9 @@ const Scene = {
       const m = new THREE.Mesh(new THREE.BoxGeometry(0.08,0.09,104),
         new THREE.MeshBasicMaterial({color:col}));
       m.position.set(x,3.55,-48); m.userData.noHit=true; S.add(m);
-      for(let i=0;i<7;i++){
-        const l = new THREE.PointLight(col, int, 16, 2);
-        l.position.set(x*0.86, 3.4, -4 - i*15); S.add(l);
+      for(let i=0;i<3;i++){
+        const l = new THREE.PointLight(col, int*0.82, 33, 2);
+        l.position.set(x*0.86, 3.4, -10 - i*32); S.add(l);
       }
     };
     mkRail(-12.55, 0x2ea8ff, 0.30);
@@ -2850,11 +3268,17 @@ const Scene = {
     bl.position.set(0,3.2,-92); S.add(bl);
 
     /* armoury glass behind the player */
+    /* everything above this line is static for the life of the session */
+    S.traverse(o=>{
+      if(o.isMesh || (o.isLight && !o.shadow)){ o.updateMatrix(); o.matrixAutoUpdate = false; }
+    });
+
     const glass = new THREE.Mesh(
       new THREE.BoxGeometry(11,3.0,0.08),
       new THREE.MeshPhysicalMaterial({color:0x8fd4ff, transparent:true, opacity:0.16, roughness:0.03, metalness:0.1, envMapIntensity:2.5, clearcoat:1})
     );
-    glass.position.set(0,2.0,7.4); glass.userData.noHit=true; S.add(glass);
+    glass.position.set(0,2.0,7.4); glass.userData.noHit=true;
+    glass.updateMatrix(); glass.matrixAutoUpdate=false; S.add(glass);
   },
 
   /* ---------- particles / impact pool -------------------------------- */
@@ -2868,10 +3292,25 @@ const Scene = {
     this.sparkGeo = new THREE.SphereGeometry(0.018,6,5);
     /* muzzle flash */
     const fg = new THREE.PlaneGeometry(0.30,0.30);
-    this.flashMat = new THREE.MeshBasicMaterial({map:this.flashTex(), transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, depthTest:false});
+    this.flashMat = new THREE.MeshBasicMaterial({map:this.flashTex('star'), transparent:true,
+      blending:THREE.AdditiveBlending, depthWrite:false, depthTest:false});
     this.flash = new THREE.Mesh(fg, this.flashMat);
     this.flash.visible=false;
+    /* corona: a wider, dimmer, tinted disc behind the core */
+    this.coronaMat = new THREE.MeshBasicMaterial({map:this.flashTex('ring'), transparent:true,
+      blending:THREE.AdditiveBlending, depthWrite:false, depthTest:false, opacity:0.55});
+    this.corona = new THREE.Mesh(new THREE.PlaneGeometry(0.30,0.30), this.coronaMat);
+    this.corona.visible=false;
     this.flashLight = new THREE.PointLight(0xffca7a, 0, 4);
+
+    /* ejected casings — cheap, and the eye reads them as production value */
+    this.casings = [];
+    this.casingGeo = new THREE.CylinderGeometry(0.0045,0.0050,0.020,7);
+    this.casingGeo.rotateZ(Math.PI/2);
+    this.impactGeo = new THREE.PlaneGeometry(0.34,0.34);
+    this.impactMat = new THREE.MeshBasicMaterial({map:this.flashTex('bloom'), transparent:true,
+      blending:THREE.AdditiveBlending, depthWrite:false});
+    this.impacts = [];
   },
   holeTex(){
     const cv=document.createElement('canvas'); cv.width=cv.height=64;
@@ -2889,21 +3328,103 @@ const Scene = {
     }
     const t=new THREE.CanvasTexture(cv); return t;
   },
-  flashTex(){
-    const cv=document.createElement('canvas'); cv.width=cv.height=128;
-    const c=cv.getContext('2d');
-    const g=c.createRadialGradient(64,64,0,64,64,60);
-    g.addColorStop(0,'rgba(255,255,240,1)'); g.addColorStop(0.22,'rgba(255,210,120,0.85)');
-    g.addColorStop(0.5,'rgba(255,140,40,0.30)'); g.addColorStop(1,'rgba(255,80,0,0)');
-    c.fillStyle=g; c.fillRect(0,0,128,128);
-    c.save(); c.translate(64,64);
-    c.fillStyle='rgba(255,235,190,0.85)';
-    for(let i=0;i<6;i++){
-      c.rotate(TAU/6);
-      c.beginPath(); c.moveTo(0,-4); c.lineTo(58,0); c.lineTo(0,4); c.closePath(); c.fill();
+  /* Muzzle flashes. VALORANT's rule: the ENVELOPE (radius + lifetime)
+     is fixed per weapon; a skin may only change the colour, the internal
+     shape language and the secondary sparks. That's why your own gun
+     never blinds you. Shapes are pre-baked white so they can be tinted. */
+  flashTex(shape){
+    this._flashTex = this._flashTex || {};
+    if(this._flashTex[shape]) return this._flashTex[shape];
+    const S=160, cv=document.createElement('canvas'); cv.width=cv.height=S;
+    const c=cv.getContext('2d'), R=S/2;
+    const rnd = mulberry32(hashStr('flash'+shape));
+    const core=(r,a)=>{
+      const g=c.createRadialGradient(R,R,0,R,R,r);
+      g.addColorStop(0,`rgba(255,255,255,${a})`);
+      g.addColorStop(0.30,'rgba(255,255,255,0.55)');
+      g.addColorStop(0.70,'rgba(255,255,255,0.14)');
+      g.addColorStop(1,'rgba(255,255,255,0)');
+      c.fillStyle=g; c.fillRect(0,0,S,S);
+    };
+    const petals=(n,len,wid,skew)=>{
+      c.save(); c.translate(R,R); c.fillStyle='rgba(255,255,255,0.9)';
+      for(let i=0;i<n;i++){
+        c.rotate(TAU/n);
+        const L=len*(skew? 0.55+rnd()*0.75 : 1);
+        c.beginPath(); c.moveTo(0,-wid); c.lineTo(L,0); c.lineTo(0,wid); c.closePath(); c.fill();
+      }
+      c.restore();
+    };
+    if(shape==='ring'){
+      core(R*0.42,1);
+      c.strokeStyle='rgba(255,255,255,0.95)'; c.lineWidth=S*0.045;
+      c.beginPath(); c.arc(R,R,R*0.56,0,TAU); c.stroke();
+      c.lineWidth=S*0.016; c.strokeStyle='rgba(255,255,255,0.5)';
+      c.beginPath(); c.arc(R,R,R*0.78,0,TAU); c.stroke();
+    } else if(shape==='plume'){
+      core(R*0.55,1);
+      c.save(); c.translate(R,R);
+      for(let i=0;i<9;i++){
+        c.rotate(TAU/9);
+        c.fillStyle=`rgba(255,255,255,${0.35+rnd()*0.5})`;
+        c.beginPath();
+        c.moveTo(0,-S*0.05);
+        c.quadraticCurveTo(R*0.55, -S*0.10, R*(0.55+rnd()*0.42), 0);
+        c.quadraticCurveTo(R*0.55, S*0.10, 0, S*0.05);
+        c.closePath(); c.fill();
+      }
+      c.restore();
+    } else if(shape==='shard'){
+      core(R*0.36,1);
+      c.save(); c.translate(R,R); c.fillStyle='rgba(255,255,255,0.92)';
+      for(let i=0;i<5;i++){
+        c.rotate(TAU/5 + 0.3);
+        c.beginPath(); c.moveTo(0,0); c.lineTo(R*0.30,-S*0.035);
+        c.lineTo(R*(0.72+rnd()*0.25),0); c.lineTo(R*0.30,S*0.035); c.closePath(); c.fill();
+      }
+      c.restore();
+    } else if(shape==='void'){
+      /* Singularity's inverted flash: a dark implosion with a bright rim */
+      const g=c.createRadialGradient(R,R,0,R,R,R);
+      g.addColorStop(0,'rgba(255,255,255,0.10)');
+      g.addColorStop(0.44,'rgba(255,255,255,0.02)');
+      g.addColorStop(0.62,'rgba(255,255,255,0.95)');
+      g.addColorStop(0.76,'rgba(255,255,255,0.30)');
+      g.addColorStop(1,'rgba(255,255,255,0)');
+      c.fillStyle=g; c.fillRect(0,0,S,S);
+      c.save(); c.translate(R,R); c.strokeStyle='rgba(255,255,255,0.7)'; c.lineWidth=2;
+      for(let i=0;i<7;i++){ c.rotate(TAU/7);
+        c.beginPath(); c.moveTo(R*0.66,0); c.lineTo(R*(0.86+rnd()*0.12),0); c.stroke(); }
+      c.restore();
+    } else if(shape==='arc'){
+      core(R*0.40,1);
+      c.save(); c.translate(R,R);
+      c.strokeStyle='rgba(255,255,255,0.9)'; c.lineCap='round';
+      for(let i=0;i<10;i++){
+        c.lineWidth=1+rnd()*2.6;
+        let a=rnd()*TAU, x=0,y=0;
+        c.beginPath(); c.moveTo(0,0);
+        for(let k=0;k<4;k++){
+          const step=R*(0.16+rnd()*0.22);
+          a += (rnd()-0.5)*1.5;
+          x+=Math.cos(a)*step; y+=Math.sin(a)*step;
+          c.lineTo(x,y);
+        }
+        c.stroke();
+      }
+      c.restore();
+    } else if(shape==='bloom'){
+      core(R*0.50,1);
+      petals(12, R*0.85, S*0.030, true);
+      petals(4, R*0.98, S*0.012, false);
+    } else {                                   /* 'star' — the default */
+      core(R*0.46,1);
+      petals(6, R*0.92, S*0.032, false);
+      petals(6, R*0.60, S*0.014, true);
     }
-    c.restore();
-    return new THREE.CanvasTexture(cv);
+    const t=new THREE.CanvasTexture(cv);
+    this._flashTex[shape]=t;
+    return t;
   },
 
   addDecal(point, normal){
@@ -2916,20 +3437,91 @@ const Scene = {
     this.decals.push({m, t:0});
     if(this.decals.length>90){ const d=this.decals.shift(); this.scene.remove(d.m); }
   },
-  addSparks(point, normal, color){
+  /* One material per colour, reused forever — a fresh MeshBasicMaterial
+     per spark meant a program lookup and a uniform block per particle. */
+  fxMat(color){
+    this._fxMats = this._fxMats || new Map();
+    const key = color.getHexString? color.getHexString() : String(color);
+    let m = this._fxMats.get(key);
+    if(!m){ m = new THREE.MeshBasicMaterial({color:new THREE.Color(color)}); this._fxMats.set(key,m); }
+    return m;
+  },
+  addSparks(point, normal, color, count, targetScene, scale){
     const col = new THREE.Color(color||0xffc070);
-    for(let i=0;i<9;i++){
-      const s = new THREE.Mesh(this.sparkGeo, new THREE.MeshBasicMaterial({color:col}));
+    const mat = this.fxMat(col);
+    const N = count||9, SC = scale||1;
+    const host = targetScene || this.scene;
+    for(let i=0;i<N;i++){
+      const s = this._sparkPool && this._sparkPool.length
+        ? this._sparkPool.pop() : new THREE.Mesh(this.sparkGeo, mat);
+      s.material = mat; s.visible = true;
       s.position.copy(point);
       const v = normal.clone().multiplyScalar(1.6)
         .add(new THREE.Vector3(rand(-1,1),rand(-0.4,1.4),rand(-1,1)));
       v.multiplyScalar(rand(1.2,3.6));
-      s.scale.setScalar(rand(0.4,1.3));
-      this.scene.add(s);
-      this.sparks.push({m:s, v, life:rand(0.22,0.5), t:0});
+      s.scale.setScalar(rand(0.4,1.3)*SC);
+      s.userData.noHit = true;
+      host.add(s);
+      this.sparks.push({m:s, v, life:rand(0.22,0.5)*(targetScene?0.5:1), t:0, host});
     }
   },
+  addCasing(pos, color, right, up){
+    this._caseMats = this._caseMats || new Map();
+    const ck = color||'#c9a227';
+    let cm = this._caseMats.get(ck);
+    if(!cm){ cm = new THREE.MeshStandardMaterial({color:new THREE.Color(ck),
+      metalness:0.95, roughness:0.30, envMapIntensity:1.4}); this._caseMats.set(ck,cm); }
+    const m = (this._casePool && this._casePool.length)
+      ? this._casePool.pop() : new THREE.Mesh(this.casingGeo, cm);
+    m.material = cm; m.visible = true;
+    m.position.copy(pos);
+    m.userData.noHit = true;
+    const v = right.clone().multiplyScalar(rand(0.9,1.6))
+      .add(up.clone().multiplyScalar(rand(0.5,1.1)))
+      .add(new THREE.Vector3(rand(-0.2,0.2),0,rand(-0.2,0.2)));
+    const spin = new THREE.Vector3(rand(-18,18),rand(-18,18),rand(-18,18));
+    (Player.viewScene||this.scene).add(m);
+    this.casings.push({m, v, spin, t:0, life:1.1});
+  },
+  addImpactBurst(point, normal, color, scale){
+    this._burstPool = this._burstPool || [];
+    const m = this._burstPool.length
+      ? this._burstPool.pop()
+      : new THREE.Mesh(this.impactGeo, this.impactMat.clone());
+    m.visible = true;
+    m.material.color.set(color||'#ffc070');
+    m.position.copy(point).addScaledVector(normal, 0.02);
+    m.lookAt(point.clone().add(normal));
+    m.rotation.z = Math.random()*TAU;
+    m.scale.setScalar((scale||1)*rand(0.5,0.8));
+    m.userData.noHit = true;
+    this.scene.add(m);
+    this.impacts.push({m, t:0, life:0.20, s:(scale||1)});
+  },
   stepFX(dt){
+    for(let i=this.casings.length-1;i>=0;i--){
+      const s=this.casings[i]; s.t+=dt;
+      s.v.y -= 3.2*dt;
+      s.m.position.addScaledVector(s.v, dt*0.35);
+      s.m.rotation.x += s.spin.x*dt; s.m.rotation.y += s.spin.y*dt; s.m.rotation.z += s.spin.z*dt;
+      if(s.t>=s.life){
+        s.m.parent && s.m.parent.remove(s.m);
+        this._casePool = this._casePool || [];
+        if(this._casePool.length < 30) this._casePool.push(s.m);
+        this.casings.splice(i,1);
+      }
+    }
+    for(let i=this.impacts.length-1;i>=0;i--){
+      const b=this.impacts[i]; b.t+=dt;
+      const k=b.t/b.life;
+      b.m.scale.setScalar(b.s*(0.5+k*1.5));
+      b.m.material.opacity = Math.max(0,1-k);
+      if(k>=1){
+        this.scene.remove(b.m);
+        if(this._burstPool.length < 24) this._burstPool.push(b.m);
+        this.impacts.splice(i,1);
+      }
+    }
     for(let i=this.sparks.length-1;i>=0;i--){
       const s = this.sparks[i];
       s.t += dt;
@@ -2937,7 +3529,12 @@ const Scene = {
       s.m.position.addScaledVector(s.v, dt);
       const k = 1 - s.t/s.life;
       s.m.scale.setScalar(Math.max(0.01, k*1.1));
-      if(s.t>=s.life){ this.scene.remove(s.m); s.m.material.dispose(); this.sparks.splice(i,1); }
+      if(s.t>=s.life){
+        (s.host||this.scene).remove(s.m);
+        this._sparkPool = this._sparkPool || [];
+        if(this._sparkPool.length < 160) this._sparkPool.push(s.m);
+        this.sparks.splice(i,1);
+      }
     }
     for(let i=this.decals.length-1;i>=0;i--){
       const d=this.decals[i]; d.t+=dt;
@@ -3058,6 +3655,7 @@ const Scene = {
 
   render(t, viewScene){
     const R = this.renderer;
+    R.shadowMap.needsUpdate = ((this._shadowTick++ & 1) === 0);
     const bloom = this.bloomOn;
     R.setRenderTarget(bloom? this.rtScene : null);
     R.clear();
@@ -3366,8 +3964,22 @@ const Player = {
     const l3 = new THREE.DirectionalLight(0xffcf9a, 0.20); l3.position.set(0.4,0.2,-2.0); vs.add(l3);
     vs.add(new THREE.AmbientLight(0x3a4a63, 0.17));
 
-    this.sway = new THREE.Group();  vs.add(this.sway);
-    this.recoil = new THREE.Group(); this.sway.add(this.recoil);
+    /* HAND-FIRST RIG. sway/recoil move the WRIST; the weapon is bolted to
+       the wrist, so every animation is something the hand does and the gun
+       simply comes along. Arms hang off fixed shoulders on the body. */
+    this.sway   = new THREE.Group();  vs.add(this.sway);
+    this.recoil = new THREE.Group();  this.sway.add(this.recoil);
+    this.wrist  = new THREE.Group();  this.recoil.add(this.wrist);
+    this.gunHolder = new THREE.Group(); this.wrist.add(this.gunHolder);
+
+    this.armR = buildR6Arm(); vs.add(this.armR);
+    this.armL = buildR6Arm(); vs.add(this.armL);
+    this.shoulderR = new THREE.Vector3().fromArray(SHOULDER.r);
+    this.shoulderL = new THREE.Vector3().fromArray(SHOULDER.l);
+    this.restR = new THREE.Vector3().fromArray(REST.r);
+    this.restL = new THREE.Vector3().fromArray(REST.l);
+    this.lhWeight = 1;
+    this._tmpA = new THREE.Vector3(); this._tmpB = new THREE.Vector3();
 
     vs.add(Scene.flash);
     vs.add(Scene.flashLight);
@@ -3382,12 +3994,17 @@ const Player = {
     this.weaponId = id;
     this.W = WEAPONS[id];
     this.currentItem = loadoutInstance(id);
-    if(this.gunRoot){ this.recoil.remove(this.gunRoot); disposeTree(this.gunRoot); }
+    if(this.gunRoot){ this.gunHolder.remove(this.gunRoot); disposeTree(this.gunRoot); }
     this.gunRoot = buildWeaponModel(id, this.currentItem);
     this.gunRoot.rotation.y = Math.PI/2;
     const vm = this.W.vm || {hip:[0.15,-0.14,-0.36], scale:1, adsZ:-0.26};
-    this.gunRoot.scale.multiplyScalar(vm.scale||1);
-    this.recoil.add(this.gunRoot);
+    const sc = vm.scale || 1;
+    this.gunRoot.scale.multiplyScalar(sc);
+    /* offset the weapon so the shooting grip lands exactly on the wrist
+       origin — that makes the wrist the pivot for every rotation */
+    const gr = (this.W.hands && this.W.hands.r) || [0,0,0];
+    this.gunHolder.position.set(-gr[2]*sc, -gr[1]*sc, gr[0]*sc);
+    this.gunHolder.add(this.gunRoot);
     const mods = this.gunRoot.userData.mods || {};
     this.inspectStyle = mods.anim || 'standard';
     this.reloadStyle = mods.reloadStyle || 'standard';
@@ -3507,25 +4124,60 @@ const Player = {
     this.recoilR.z += (Math.random()-0.5)*0.20;
     this.spreadHeat = Math.min(1, this.spreadHeat + 0.20);
 
-    /* muzzle flash */
+    /* ---- muzzle flash -------------------------------------------------
+       The envelope (radius + 45 ms lifetime) is fixed per weapon class;
+       a skin may only change colour, internal shape and the sparks. */
+    const V = skin.vfx || {};
+    const F = V.flash || {};
     const mz = new THREE.Vector3().fromArray(W.muzzle);
     this.gunRoot.localToWorld(mz);
+    const envelope = (W.dmg>80 ? 1.5 : W.dmg<30 ? 0.85 : 1);
+    const jit = rand(0.82,1.14);
+
+    Scene.flash.material.map = Scene.flashTex(F.shape || 'star');
+    Scene.flash.material.needsUpdate = true;
+    Scene.flash.material.color.set(F.core || '#fff2d0');
     Scene.flash.position.copy(mz);
     Scene.flash.rotation.z = Math.random()*TAU;
-    Scene.flash.scale.setScalar(rand(0.7,1.25) * (W.dmg>80?1.5:1));
+    Scene.flash.scale.setScalar(envelope * jit * (F.scale || 1));
     Scene.flash.visible = true;
-    Scene.flash.material.color.set(skin.flash || '#ffd9a0');
+
+    if(F.corona){
+      Scene.corona.material.map = Scene.flashTex(F.coronaShape || 'ring');
+      Scene.corona.material.needsUpdate = true;
+      Scene.corona.material.color.set(F.corona);
+      Scene.corona.material.opacity = F.coronaAlpha!=null? F.coronaAlpha : 0.6;
+      Scene.corona.position.copy(mz);
+      Scene.corona.rotation.z = -Scene.flash.rotation.z*0.6;
+      Scene.corona.scale.setScalar(envelope * jit * (F.coronaScale || 1.7));
+      Scene.corona.visible = true;
+      if(!Scene.corona.parent) this.viewScene.add(Scene.corona);
+    }
     this._flashT = 0.045;
+
     Scene.flashLight.position.copy(mz).add(new THREE.Vector3(0,0,-0.2));
-    Scene.flashLight.color.set(skin.flash || '#ffca7a');
-    Scene.flashLight.intensity = 5;
+    Scene.flashLight.color.set(F.light || F.core || '#ffca7a');
+    Scene.flashLight.intensity = 5 * (F.lightScale || 1);
+
+    if(F.sparks){
+      Scene.addSparks(mz, new THREE.Vector3(0,0,-1),
+        new THREE.Color(F.sparkColor || F.core || '#ffc070'), F.sparks, this.viewScene, 0.5);
+    }
+    if(V.casing !== false){
+      const ej = new THREE.Vector3(0.02, 0.03, 0.03);
+      this.gunRoot.localToWorld(ej);
+      const right = new THREE.Vector3(1,0,0)
+        .applyQuaternion(this.gunRoot.getWorldQuaternion(new THREE.Quaternion()));
+      Scene.addCasing(ej, V.casingColor || '#c9a227', right, new THREE.Vector3(0,1,0));
+    }
 
     /* trace */
     const spread = W.spread * (0.35 + 0.65*(1-this.ads)) * (1 + this.spreadHeat*1.6) * (1 + this.moveAmt*1.4);
     const dir = new THREE.Vector3(0,0,-1).applyQuaternion(Scene.cam.quaternion);
     dir.x += (Math.random()-0.5)*spread; dir.y += (Math.random()-0.5)*spread;
     dir.normalize();
-    const ray = new THREE.Raycaster(Scene.cam.position.clone(), dir, 0.1, 300);
+    const ray = this._ray || (this._ray = new THREE.Raycaster());
+    ray.set(Scene.cam.position, dir); ray.near = 0.1; ray.far = 300;
     const tHits = ray.intersectObjects(Targets.hitMeshes, false);
     let endPoint = Scene.cam.position.clone().addScaledVector(dir, 200);
 
@@ -3537,36 +4189,87 @@ const Player = {
         Audio7.hit(res.head);
         UI.hitmarker(res.head);
         UI.popScore(res.points, res.label, res.head);
-        Scene.addSparks(h.point, h.face? h.face.normal.clone(): dir.clone().negate(), res.head? 0xffd166 : 0xff8844);
+        const hn = h.face? h.face.normal.clone(): dir.clone().negate();
+        const IM = V.impact || {};
+        Scene.addSparks(h.point, hn, new THREE.Color(IM.color || (res.head? '#ffd166':'#ff8844')));
+        if(IM.burst) Scene.addImpactBurst(h.point, hn, IM.color || '#ffc070', IM.scale || 1);
         Save.credits += Math.round(res.points/24);
         UI.updateHUD();
       }
     } else {
-      const wHits = ray.intersectObjects(Scene.scene.children, true);
-      const solid = wHits.find(h=> h.object.isMesh && !h.object.userData.noHit && h.object.material && !h.object.material.transparent);
+      /* raycast a curated list of world geometry, not the whole graph —
+         the graph also holds every live decal, spark, casing and tracer */
+      const wHits = ray.intersectObjects(Scene.solids, false);
+      const solid = wHits[0];
       if(solid){
         endPoint = solid.point.clone();
         const n = solid.face? solid.face.normal.clone().transformDirection(solid.object.matrixWorld) : dir.clone().negate();
+        const IM2 = V.impact || {};
         Scene.addDecal(solid.point, n);
-        Scene.addSparks(solid.point, n, 0xbba98a);
+        Scene.addSparks(solid.point, n, new THREE.Color(IM2.color || '#bba98a'));
+        if(IM2.burst) Scene.addImpactBurst(solid.point, n, IM2.color || '#ffc070', (IM2.scale||1)*0.8);
         Audio7.noise(0.10,0.22,'bandpass',900,1.4,0.09);
       }
     }
-    this.addTracer(mz, endPoint, skin.tracer || '#ffd9a0');
+    this.addTracer(mz, endPoint, V.tracer || {});
     UI.updateHUD();
     if(this.ammo===0) setTimeout(()=>this.startReload(), 220);
   },
 
-  addTracer(from, to, color){
+  /* Tracers are first-person only and must never crowd the crosshair,
+     so every style tapers its alpha toward the camera. */
+  addTracer(from, to, T){
+    const style = T.style || 'bullet';
+    const color = new THREE.Color(T.color || '#ffd9a0');
     const dist = from.distanceTo(to);
-    const geo = new THREE.CylinderGeometry(0.010,0.004, dist, 6, 1, true);
-    geo.rotateX(Math.PI/2); geo.translate(0,0,-dist/2);
-    const mat = new THREE.MeshBasicMaterial({color:new THREE.Color(color), transparent:true, opacity:0.85,
-      blending:THREE.AdditiveBlending, depthWrite:false});
-    const m = new THREE.Mesh(geo, mat);
-    m.position.copy(from); m.lookAt(to); m.userData.noHit = true;
-    Scene.scene.add(m);
-    this.tracers.push({m, t:0, life:0.11});
+    const w = (T.width || 1) * (style==='beam'? 0.020 : style==='void'? 0.016 : 0.010);
+    /* Unit-length tracer geometry, scaled per shot. Building a fresh
+       CylinderGeometry for every bullet was allocating three typed
+       arrays and a draw-range at up to 15 shots a second. */
+    if(!Player._tracerGeo){
+      Player._tracerGeo = {};
+      [6,8].forEach(seg=>{
+        const g = new THREE.CylinderGeometry(1, 0.35, 1, seg, 1, true);
+        g.rotateX(Math.PI/2); g.translate(0,0,-0.5);
+        Player._tracerGeo[seg] = g;
+      });
+      Player._tracerPool = [];
+    }
+    const mk = (r1,r2,seg,col,op,add)=>{
+      const m = Player._tracerPool.length
+        ? Player._tracerPool.pop()
+        : new THREE.Mesh(Player._tracerGeo[6], new THREE.MeshBasicMaterial({
+            transparent:true, depthWrite:false}));
+      m.geometry = Player._tracerGeo[seg] || Player._tracerGeo[6];
+      m.material.color.copy(col);
+      m.material.opacity = op;
+      m.material.blending = add? THREE.AdditiveBlending : THREE.NormalBlending;
+      m.material.needsUpdate = true;
+      m.visible = true;
+      m.position.copy(from); m.lookAt(to);
+      m.scale.set(r1, r1, dist);
+      m.userData.noHit = true;
+      m.userData.r2 = r2;
+      Scene.scene.add(m);
+      return m;
+    };
+    const life = style==='beam'? 0.16 : style==='holy'? 0.14 : 0.10;
+    if(style==='holy'){
+      this.tracers.push({m:mk(w*2.6,w*0.9,8,color,0.22,true), t:0, life:life*1.3, style:'bullet'});
+      this.tracers.push({m:mk(w,w*0.35,6,new THREE.Color('#ffffff'),0.9,true), t:0, life, style});
+    } else if(style==='void'){
+      this.tracers.push({m:mk(w,w*0.35,6,color,0.85,true), t:0, life, style});
+      this.tracers.push({m:mk(w*0.45,w*0.14,6,new THREE.Color(0x000000),0.85,false), t:0, life, style:'bullet'});
+    } else {
+      this.tracers.push({m:mk(w,w*0.35,style==='beam'?8:6,color,0.85,true), t:0, life, style});
+    }
+    if(style==='ember'){
+      const d = to.clone().sub(from);
+      for(let i=0;i<4;i++){
+        const p = from.clone().addScaledVector(d, 0.15+Math.random()*0.7);
+        Scene.addSparks(p, new THREE.Vector3(0,1,0), color, 2, null, 0.35);
+      }
+    }
   },
 
   /* ---------- per-frame -------------------------------------------- */
@@ -3625,7 +4328,7 @@ const Player = {
     if(this._flashT>0){
       this._flashT -= dt;
       Scene.flashLight.intensity = Math.max(0, Scene.flashLight.intensity - dt*140);
-      if(this._flashT<=0){ Scene.flash.visible=false; Scene.flashLight.intensity=0; }
+      if(this._flashT<=0){ Scene.flash.visible=false; Scene.corona.visible=false; Scene.flashLight.intensity=0; }
     }
 
     /* scope overlay for the sniper */
@@ -3637,9 +4340,17 @@ const Player = {
   stepTracers(dt){
     for(let i=this.tracers.length-1;i>=0;i--){
       const t=this.tracers[i]; t.t+=dt;
-      t.m.material.opacity = 0.9*(1-t.t/t.life);
-      t.m.scale.x = t.m.scale.y = 1 + t.t*6;
-      if(t.t>=t.life){ Scene.scene.remove(t.m); t.m.geometry.dispose(); t.m.material.dispose(); this.tracers.splice(i,1); }
+      const kk = 1-t.t/t.life;
+      t.m.material.opacity = 0.9*kk*kk;
+      const gw = t.m.userData.w0 || (t.m.userData.w0 = t.m.scale.x);
+      const grow = gw * (1 + t.t*(t.style==='beam'? 3 : 6));
+      t.m.scale.x = t.m.scale.y = grow;
+      if(t.t>=t.life){
+        Scene.scene.remove(t.m);
+        t.m.userData.w0 = 0;
+        if(Player._tracerPool.length < 24) Player._tracerPool.push(t.m);
+        this.tracers.splice(i,1);
+      }
     }
   },
 
@@ -3652,9 +4363,17 @@ const Player = {
     if(mods.tick) mods.tick(this.gunRoot, time);
 
     /* --- base pose --- */
-    const vm = W.vm || {hip:[0.15,-0.14,-0.36], scale:1, adsZ:-0.26};
-    const hip = new THREE.Vector3(vm.hip[0], vm.hip[1], vm.hip[2]);
-    const aim = new THREE.Vector3(0.000, -(SIGHT_Y[this.weaponId]||0.09)*(vm.scale||1), vm.adsZ - 0.11);
+    const vm = W.vm || {hand:[0.12,-0.15,-0.30], scale:1, adsZ:-0.26};
+    const sc = vm.scale || 1;
+    const gr = (W.hands && W.hands.r) || [0,0,0];
+    const hip = new THREE.Vector3(vm.hand[0], vm.hand[1], vm.hand[2]);
+    /* ADS: place the SIGHT on the screen centre, then convert that gun
+       placement into the wrist placement it implies */
+    const aim = new THREE.Vector3(
+      0.000        + gr[2]*sc,
+      -(SIGHT_Y[this.weaponId]||0.09)*sc + gr[1]*sc,
+      (vm.adsZ - 0.11)                   - gr[0]*sc
+    );
     const p = hip.clone().lerp(aim, this.ads);
     const rot = new THREE.Vector3(0, -0.10*(1-this.ads), 0.045*(1-this.ads));
 
@@ -3771,16 +4490,67 @@ const Player = {
       if(W.bolt) g.bolt.rotation.x = c*0.9;
     }
 
-    this.sway.position.lerp(p, 1-Math.pow(0.0000015, dt));
-    this.sway.rotation.x = lerp(this.sway.rotation.x, rot.x, 1-Math.pow(0.0000015, dt));
-    this.sway.rotation.y = lerp(this.sway.rotation.y, rot.y, 1-Math.pow(0.0000015, dt));
-    this.sway.rotation.z = lerp(this.sway.rotation.z, rot.z, 1-Math.pow(0.0000015, dt));
+    const k = 1-Math.pow(0.0000015, dt);
+    this.sway.position.lerp(p, k);
+    this.sway.rotation.x = lerp(this.sway.rotation.x, rot.x, k);
+    this.sway.rotation.y = lerp(this.sway.rotation.y, rot.y, k);
+    this.sway.rotation.z = lerp(this.sway.rotation.z, rot.z, k);
+
+    this.solveArms(dt);
+  },
+
+  /* ------------------------------------------------------------------
+     Arms follow the hands. The right hand IS the wrist. The left hand
+     rides the weapon's support point, moves to the magazine mid-reload,
+     and lets go entirely during an inspect — which is why a spinning
+     exotic never wrenches the shoulder around any more.
+  ------------------------------------------------------------------ */
+  solveArms(dt){
+    const W = this.W, sc = (W.vm && W.vm.scale) || 1;
+    this.sway.updateMatrixWorld(true);
+
+    const handR = this._tmpA.setFromMatrixPosition(this.wrist.matrixWorld);
+
+    let lhTarget = 1;
+    const handL = this._tmpB;
+    if(this.reloading > 0){
+      const mag = this.gunRoot.userData.groups.mag;
+      mag.updateMatrixWorld(true);
+      handL.setFromMatrixPosition(mag.matrixWorld);
+      handL.y -= 0.03;
+      if(!mag.visible) lhTarget = 0.35;
+    } else if(this.inspecting > 0){
+      lhTarget = 0;
+      handL.copy(this.restL);
+    } else {
+      const gl = (W.hands && W.hands.l) || [0.2,0,0];
+      handL.set(gl[0]*sc, gl[1]*sc, gl[2]*sc);
+      this.gunRoot.localToWorld(handL);
+    }
+    this.lhWeight = lerp(this.lhWeight, lhTarget, 1-Math.pow(0.0002, dt));
+    if(this.lhWeight < 0.999) handL.lerp(this.restL, 1-this.lhWeight);
+
+    /* keep both hands inside arm's length of the shoulder */
+    this.clampReach(this.shoulderR, handR);
+    this.clampReach(this.shoulderL, handL);
+
+    poseR6Arm(this.armR, this.shoulderR, handR,  0.30);
+    poseR6Arm(this.armL, this.shoulderL, handL, -0.30);
+  },
+
+  clampReach(S, T){
+    const dx = T.x-S.x, dy = T.y-S.y, dz = T.z-S.z;
+    const d = Math.hypot(dx,dy,dz);
+    if(d > ARM.maxReach){
+      const f = ARM.maxReach/d;
+      T.set(S.x+dx*f, S.y+dy*f, S.z+dz*f);
+    }
   }
 };
 
 function disposeTree(root){
   root.traverse(o=>{
-    if(o.geometry) o.geometry.dispose();
+    if(o.geometry && !o.geometry.userData.shared) o.geometry.dispose();
   });
 }
 
@@ -3818,7 +4588,7 @@ function drawItemIcon(cv, item, opts){
   if(opts.glow!==false){
     const rc = RARITY[skin.rarity].color;
     const g = ctx.createRadialGradient(Wd/2,Ht/2,2,Wd/2,Ht/2,Math.max(Wd,Ht)*0.52);
-    g.addColorStop(0, rc+'55'); g.addColorStop(0.55, rc+'18'); g.addColorStop(1,'rgba(0,0,0,0)');
+    g.addColorStop(0, rc+'3a'); g.addColorStop(0.55, rc+'12'); g.addColorStop(1,'rgba(0,0,0,0)');
     ctx.fillStyle=g; ctx.fillRect(0,0,Wd,Ht);
   }
 
@@ -3829,9 +4599,9 @@ function drawItemIcon(cv, item, opts){
     const tex = skinCanvas(skin, kind, item.float, 384);
     ctx.drawImage(tex, bx, by, bw, bh);
     const lg = ctx.createLinearGradient(0,by,0,by+bh);
-    lg.addColorStop(0,'rgba(255,255,255,0.26)');
-    lg.addColorStop(0.42,'rgba(255,255,255,0.02)');
-    lg.addColorStop(1,'rgba(0,0,0,0.42)');
+    lg.addColorStop(0,'rgba(255,255,255,0.13)');
+    lg.addColorStop(0.38,'rgba(255,255,255,0.01)');
+    lg.addColorStop(1,'rgba(0,0,0,0.30)');
     ctx.fillStyle=lg; ctx.fillRect(bx,by,bw,bh);
     ctx.restore();
     ctx.save(); path();
@@ -3875,10 +4645,48 @@ function drawItemIcon(cv, item, opts){
     ctx.restore();
   }
 }
+/* Icons are expensive to compose and highly repetitive — the same skin
+   at the same wear band draws identically every time. Cache the source
+   and blit it; a blit is a memcpy next to a full repaint. */
+const IconCache = new Map();
+function iconSource(item, w, h, glow){
+  const key = item.skinId+'|'+wearBucket(item.float)+'|'+w+'x'+h+'|'+(glow===false?0:1);
+  let src = IconCache.get(key);
+  if(src) return src;
+  src = document.createElement('canvas'); src.width=w; src.height=h;
+  drawItemIcon(src, item, {glow:glow});
+  if(IconCache.size > 240) IconCache.delete(IconCache.keys().next().value);
+  IconCache.set(key, src);
+  return src;
+}
 function iconFor(item, w, h, glow){
+  w = w||264; h = h||172;
   const cv = document.createElement('canvas');
-  cv.width = w||264; cv.height = h||172;
-  drawItemIcon(cv, item, {glow:glow});
+  cv.width = w; cv.height = h;
+  cv.getContext('2d').drawImage(iconSource(item,w,h,glow), 0, 0);
+  return cv;
+}
+/* Grid cards paint only once they scroll into view, so a 300-skin
+   inventory costs the same to open as a 10-skin one. */
+const LazyIcons = ('IntersectionObserver' in window) ? new IntersectionObserver(entries=>{
+  entries.forEach(en=>{
+    if(!en.isIntersecting) return;
+    const cv = en.target, d = cv._icon;
+    if(d && !cv._painted){
+      cv._painted = true;
+      cv.getContext('2d').drawImage(iconSource(d.item,cv.width,cv.height,d.glow),0,0);
+    }
+    LazyIcons.unobserve(cv);
+  });
+}, {root:null, rootMargin:'320px'}) : null;
+
+function lazyIcon(item, w, h, glow){
+  w = w||264; h = h||172;
+  const cv = document.createElement('canvas');
+  cv.width = w; cv.height = h;
+  if(!LazyIcons){ cv.getContext('2d').drawImage(iconSource(item,w,h,glow),0,0); return cv; }
+  cv._icon = {item, glow};
+  LazyIcons.observe(cv);
   return cv;
 }
 /* container art — a stencilled weapon crate */
@@ -4038,6 +4846,7 @@ const UI = {
     });
 
     this.buildWepBar();
+    this.cacheHud();
     this.refresh();
   },
 
@@ -4046,29 +4855,66 @@ const UI = {
     $('#weps').innerHTML = WEAPON_ORDER.map((w,i)=>
       `<div class="w" data-w="${w}">${i+1} · ${WEAPONS[w].name}</div>`).join('');
   },
+  /* Called every frame, so it must not touch the DOM unless a value
+     actually changed — blind writes force style recalc on real hardware. */
+  _h:{}, _prev:{},
+  cacheHud(){
+    const ids = ['magn','resn','wepname','magbar','scoren','combo','timet','timer',
+                 'modet','hcred','hlvl','hxp','overlay','clicktoplay'];
+    ids.forEach(i=> this._h[i] = document.getElementById(i));
+    this._h.weps = $$('#weps .w');
+  },
+  _set(node, key, val){
+    if(!node || this._prev[key] === val) return;
+    this._prev[key] = val; node.textContent = val;
+  },
+  _w(node, key, val){
+    if(!node || this._prev[key] === val) return;
+    this._prev[key] = val; node.style.width = val;
+  },
+  _cls(node, key, name, on){
+    if(!node || this._prev[key] === on) return;
+    this._prev[key] = on; node.classList.toggle(name, on);
+  },
   updateHUD(){
-    const P = Player, W = P.W;
-    if(!W) return;
-    $('#magn').textContent = P.ammo;
-    $('#resn').textContent = P.reserve;
-    $('#wepname').textContent = W.name;
-    $('#magbar').style.width = (P.ammo/W.mag*100)+'%';
-    $('#scoren').textContent = Targets.score.toLocaleString();
-    const cm = $('#combo');
-    cm.textContent = 'x'+Targets.combo.toFixed(1)+' COMBO';
-    cm.classList.toggle('on', Targets.combo>1.05);
+    const P = Player, W = P.W, h = this._h;
+    if(!W || !h.magn) return;
+    this._set(h.magn,'a',P.ammo);
+    this._set(h.resn,'b',P.reserve);
+    this._set(h.wepname,'c',W.name);
+    this._w(h.magbar,'d',(P.ammo/W.mag*100)+'%');
+    if(this._prev.sc !== Targets.score){
+      this._prev.sc = Targets.score;
+      this._set(h.scoren,'e',Targets.score.toLocaleString());
+    }
+    const cb = Targets.combo>1.05;
+    const c10 = Math.round(Targets.combo*10);
+    if(this._prev.cb !== c10){
+      this._prev.cb = c10;
+      this._set(h.combo,'f','x'+(c10/10).toFixed(1)+' COMBO');
+    }
+    this._cls(h.combo,'g','on',cb);
     const tl = Targets.timeLeft;
-    $('#timet').textContent = tl===Infinity? '∞' : Math.ceil(tl);
-    $('#timer').classList.toggle('warn', tl!==Infinity && tl<10);
-    $('#modet').textContent = {free:'Free Fire',timeattack:'Time Attack',precision:'Precision'}[Targets.mode];
-    $('#hcred').textContent = money(Save.credits);
-    $('#hlvl').textContent = Save.level;
-    $('#hxp').style.width = (Save.xp/xpForLevel(Save.level)*100)+'%';
-    $$('#weps .w').forEach(n=> n.classList.toggle('on', n.dataset.w===P.weaponId));
-    const inRange = !$('#overlay').classList.contains('on') && !this.modal;
-    document.body.classList.toggle('inrange', inRange);
-    const ctp = $('#clicktoplay');
-    if(ctp) ctp.classList.toggle('on', inRange && !P.locked);
+    this._set(h.timet,'h', tl===Infinity? '∞' : Math.ceil(tl));
+    this._cls(h.timer,'i','warn', tl!==Infinity && tl<10);
+    this._set(h.modet,'j',{free:'Free Fire',timeattack:'Time Attack',precision:'Precision'}[Targets.mode]);
+    if(this._prev.cr !== Save.credits){
+      this._prev.cr = Save.credits;
+      this._set(h.hcred,'k',money(Save.credits));
+    }
+    this._set(h.hlvl,'l',Save.level);
+    const xpPct = Math.round(Save.xp/xpForLevel(Save.level)*200);
+    if(this._prev.xp !== xpPct){
+      this._prev.xp = xpPct;
+      this._w(h.hxp,'m',(xpPct/2)+'%');
+    }
+    if(this._prev.wep !== P.weaponId){
+      this._prev.wep = P.weaponId;
+      h.weps.forEach(n=> n.classList.toggle('on', n.dataset.w===P.weaponId));
+    }
+    const inRange = !h.overlay.classList.contains('on') && !this.modal;
+    this._cls(document.body,'n','inrange',inRange);
+    this._cls(h.clicktoplay,'o','on', inRange && !P.locked);
   },
   updateSkinTag(){
     const it = Player.currentItem;
@@ -4269,7 +5115,7 @@ const UI = {
         <div class="meta"><span style="font-size:10px">float ${it.float.toFixed(6)}</span></div>
       </div>`;
     const pic = c.querySelector('.pic');
-    pic.appendChild(iconFor(it, 264, 172));
+    pic.appendChild(lazyIcon(it, 264, 172));
     c.onclick = ()=>{
       if(this.tradeMode){
         if(this.tradeSel.has(it.uid)) this.tradeSel.delete(it.uid);
