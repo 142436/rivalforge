@@ -4140,9 +4140,9 @@ const Player = {
     Scene.flash.position.copy(mz);
     Scene.flash.rotation.z = Math.random()*TAU;
     Scene.flash.scale.setScalar(envelope * jit * (F.scale || 1));
-    Scene.flash.visible = true;
+    Scene.flash.visible = !this.scoped;
 
-    if(F.corona){
+    if(F.corona && !this.scoped){
       Scene.corona.material.map = Scene.flashTex(F.coronaShape || 'ring');
       Scene.corona.material.needsUpdate = true;
       Scene.corona.material.color.set(F.corona);
@@ -4331,10 +4331,17 @@ const Player = {
       if(this._flashT<=0){ Scene.flash.visible=false; Scene.corona.visible=false; Scene.flashLight.intensity=0; }
     }
 
-    /* scope overlay for the sniper */
-    UI.setScope(this.W.scope && this.ads>0.72);
+    /* Scoped: the WHOLE viewmodel goes away, not just the weapon. The
+       arms hang off the body rather than off the gun, so hiding the gun
+       on its own left two hands floating in the middle of the scope. */
+    const scoped = !!(this.W.scope && this.ads > 0.72);
+    UI.setScope(scoped);
     UI.setAds(this.ads);
-    if(this.gunRoot) this.gunRoot.visible = !(this.W.scope && this.ads>0.72);
+    this.scoped = scoped;
+    if(this.gunRoot) this.gunRoot.visible = !scoped;
+    if(this.armR) this.armR.visible = !scoped;
+    if(this.armL) this.armL.visible = !scoped;
+    if(scoped){ Scene.flash.visible = false; Scene.corona.visible = false; }
   },
 
   stepTracers(dt){
@@ -4506,6 +4513,7 @@ const Player = {
      exotic never wrenches the shoulder around any more.
   ------------------------------------------------------------------ */
   solveArms(dt){
+    if(this.scoped) return;          /* nothing to pose while hidden */
     const W = this.W, sc = (W.vm && W.vm.scale) || 1;
     this.sway.updateMatrixWorld(true);
 
