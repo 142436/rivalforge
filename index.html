@@ -1158,6 +1158,121 @@ class Painter {
     c.globalAlpha=1; return this;
   }
 
+  /* Bake form into the flat texture. UVs run u = along the weapon,
+     v = height, so a vertical ramp reads as a top-lit machined surface
+     and the edge lines read as chamfers. Without this every part is a
+     flat coloured slab no matter how good the pattern on it is. */
+  formShade(strength=1){
+    const c=this.c, w=this.w, h=this.h;
+    c.save();
+    /* top-lit ramp */
+    let g=c.createLinearGradient(0,0,0,h);
+    g.addColorStop(0.00,`rgba(255,255,255,${0.20*strength})`);
+    g.addColorStop(0.16,`rgba(255,255,255,${0.07*strength})`);
+    g.addColorStop(0.46,'rgba(0,0,0,0)');
+    g.addColorStop(0.80,`rgba(0,0,0,${0.22*strength})`);
+    g.addColorStop(1.00,`rgba(0,0,0,${0.46*strength})`);
+    c.fillStyle=g; c.fillRect(0,0,w,h);
+    /* chamfer highlight along the top edge, shadow along the bottom */
+    c.fillStyle=`rgba(255,255,255,${0.34*strength})`;
+    c.fillRect(0,0,w,Math.max(1,h*0.018));
+    c.fillStyle=`rgba(255,255,255,${0.12*strength})`;
+    c.fillRect(0,h*0.018,w,Math.max(1,h*0.016));
+    c.fillStyle=`rgba(0,0,0,${0.40*strength})`;
+    c.fillRect(0,h-Math.max(1,h*0.022),w,Math.max(1,h*0.022));
+    /* contact occlusion at the two ends of the part */
+    g=c.createLinearGradient(0,0,w,0);
+    g.addColorStop(0,`rgba(0,0,0,${0.30*strength})`);
+    g.addColorStop(0.10,'rgba(0,0,0,0)');
+    g.addColorStop(0.90,'rgba(0,0,0,0)');
+    g.addColorStop(1,`rgba(0,0,0,${0.30*strength})`);
+    c.fillStyle=g; c.fillRect(0,0,w,h);
+    c.restore();
+    return this;
+  }
+
+  /* a machined seam: dark cut with a lit lip under it */
+  panelCut(v, strength=1){
+    const c=this.c, y=this.h*v, t=Math.max(1.5,this.h*0.012);
+    c.fillStyle=`rgba(0,0,0,${0.55*strength})`; c.fillRect(0,y,this.w,t);
+    c.fillStyle=`rgba(255,255,255,${0.22*strength})`; c.fillRect(0,y+t,this.w,t*0.7);
+    return this;
+  }
+
+  /* rows of fasteners — cheap, and the eye reads them as engineering */
+  bolts(n=6, v=0.24, r=0.012, col='rgba(210,220,235,0.75)'){
+    const c=this.c, y=this.h*v, rr=this.w*r;
+    for(let i=0;i<n;i++){
+      const x=this.w*((i+0.5)/n);
+      c.fillStyle='rgba(0,0,0,0.5)';
+      c.beginPath(); c.arc(x,y+rr*0.28,rr,0,TAU); c.fill();
+      c.fillStyle=col;
+      c.beginPath(); c.arc(x,y,rr,0,TAU); c.fill();
+      c.strokeStyle='rgba(0,0,0,0.55)'; c.lineWidth=Math.max(1,rr*0.30);
+      c.beginPath(); c.moveTo(x-rr*0.6,y); c.lineTo(x+rr*0.6,y); c.stroke();
+    }
+    return this;
+  }
+
+  /* vent slots cut into the shroud */
+  vents(n=5, v=0.42, wFrac=0.055, hFrac=0.20){
+    const c=this.c;
+    const sw=this.w*wFrac, sh=this.h*hFrac, y=this.h*v;
+    for(let i=0;i<n;i++){
+      const x=this.w*(0.14+ i*(0.72/Math.max(1,n-1))) - sw/2;
+      c.fillStyle='rgba(0,0,0,0.72)';
+      c.beginPath(); c.roundRect(x,y,sw,sh,sw*0.4); c.fill();
+      c.fillStyle='rgba(255,255,255,0.20)';
+      c.beginPath(); c.roundRect(x,y+sh*0.82,sw,sh*0.18,sw*0.3); c.fill();
+    }
+    return this;
+  }
+
+  /* diamond knurling for grips — reads far better than dots */
+  knurl(col='rgba(0,0,0,0.5)', hi='rgba(255,255,255,0.13)', step=0.055){
+    const c=this.c, d=this.w*step;
+    c.save(); c.lineWidth=Math.max(1,d*0.16);
+    for(const [ang,st] of [[0.7,col],[-0.7,hi]]){
+      c.strokeStyle=st;
+      c.save(); c.translate(this.w/2,this.h/2); c.rotate(ang); c.translate(-this.w,-this.h);
+      for(let x=0;x<this.w*2;x+=d){ c.beginPath(); c.moveTo(x,0); c.lineTo(x,this.h*2); c.stroke(); }
+      c.restore();
+    }
+    c.restore(); return this;
+  }
+
+  /* Trace the part's own silhouette. UVs are the part's bounding box,
+     so an inset rounded rect lands exactly on its outline — this is what
+     makes the glow look like it was routed around the gun rather than
+     scribbled on it. */
+  traceOutline(col, inset=0.055, width=0.020, glow=true){
+    const c=this.c, m=this.w*inset;
+    c.save();
+    if(glow){ c.shadowColor=col; c.shadowBlur=this.w*0.055; }
+    c.strokeStyle=col; c.lineWidth=this.w*width; c.lineJoin='round';
+    c.beginPath();
+    const r=this.w*0.06;
+    c.roundRect(m, m, this.w-m*2, this.h-m*2, r);
+    c.stroke();
+    if(glow){ c.shadowBlur=this.w*0.11; c.globalAlpha=0.55; c.stroke(); }
+    c.restore(); return this;
+  }
+
+  /* a glowing run with nodes at the vertices */
+  traceRun(col, pts, width=0.016, node=0.020){
+    const c=this.c;
+    c.save(); c.shadowColor=col; c.shadowBlur=this.w*0.06;
+    c.strokeStyle=col; c.lineWidth=this.w*width; c.lineJoin='round'; c.lineCap='round';
+    c.beginPath();
+    pts.forEach(([x,y],i)=> i? c.lineTo(this.w*x,this.h*y) : c.moveTo(this.w*x,this.h*y));
+    c.stroke();
+    c.globalAlpha=0.6; c.stroke();
+    c.globalAlpha=1; c.fillStyle=col;
+    pts.forEach(([x,y],i)=>{ if(i%2) return;
+      c.beginPath(); c.arc(this.w*x,this.h*y,this.w*node,0,TAU); c.fill(); });
+    c.restore(); return this;
+  }
+
   /* ---- wear ------------------------------------------------ */
   applyWear(baseMetal='#4a4d55'){
     const f=this.wear; if(f<=0.02) return this;
@@ -1206,17 +1321,27 @@ class Painter {
 const TexCache = new Map();
 function wearBucket(f){ return Math.round(clamp(f,0,1)*6)/6; }
 
-function skinCanvas(skin, part, float, size){
+function skinCanvas(skin, part, float, size, channel){
   const S = size||384;
-  const key = `${skin.id}|${part}|${wearBucket(float)}|${S}`;
+  const key = `${skin.id}|${part}|${wearBucket(float)}|${S}|${channel||'c'}`;
   if(TexCache.has(key)) return TexCache.get(key);
   const cv = document.createElement('canvas'); cv.width=cv.height=S;
   const ctx = cv.getContext('2d');
   const rnd = mulberry32(hashStr(skin.id+part));
   const P = new Painter(ctx, S, S, part, clamp(float,0,1), rnd);
   ctx.imageSmoothingEnabled = true;
-  try { skin.paint(P); } catch(e){ P.fill('#6b6f78'); console.warn('paint fail',skin.id,e); }
-  if(skin.wearable!==false) P.applyWear(skin.baseMetal||'#4b4e57');
+  if(channel === 'e'){
+    /* emissive pass: black everywhere except the parts that light up.
+       This is what lets a matte gun carry glowing tracery. */
+    ctx.fillStyle='#000'; ctx.fillRect(0,0,S,S);
+    if(skin.paintEmissive){
+      try { skin.paintEmissive(P); } catch(e){ console.warn('emissive fail',skin.id,e); }
+    }
+  } else {
+    try { skin.paint(P); } catch(e){ P.fill('#6b6f78'); console.warn('paint fail',skin.id,e); }
+    if(skin.formShade !== false) P.formShade(skin.formShade || 1);
+    if(skin.wearable!==false) P.applyWear(skin.baseMetal||'#4b4e57');
+  }
   if(TexCache.size > 320){                      /* keep VRAM/heap bounded */
     const oldest = TexCache.keys().next().value;
     TexCache.delete(oldest);
@@ -1552,7 +1677,14 @@ function makeMaterial(skin, kindId, mat, float, opts){
       metalness: (skin.metalOverride!=null? skin.metalOverride : mk.metal),
       envMapIntensity: (skin.envBoost || 1.1) * 0.42
     });
-    if(skin.emissiveKinds && skin.emissiveKinds.indexOf(kindId)>=0){
+    if(skin.paintEmissive){
+      /* dedicated emissive channel: black except the glowing details,
+         so the bloom pass lights only those and the body stays matte */
+      const ecv = skinCanvas(skin, kindId, float, 384, 'e');
+      m.emissiveMap = texFromCanvas(ecv);
+      m.emissive = new THREE.Color(skin.emissive || '#ffffff');
+      m.emissiveIntensity = skin.emissiveIntensity!=null? skin.emissiveIntensity : 1.35;
+    } else if(skin.emissiveKinds && skin.emissiveKinds.indexOf(kindId)>=0){
       m.emissive = new THREE.Color(skin.emissive||'#00ffcc');
       m.emissiveMap = m.map;
       m.emissiveIntensity = skin.emissiveIntensity||0.9;
@@ -1615,6 +1747,8 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
     try { mods.build(root, sub, skin, W, float); }
     catch(e){ console.warn('mod build failed', skin.id, e); }
   }
+
+  buildOverlay(root, sub, skin, W, float);
 
   root.userData.skin = skin;
   root.userData.mods = mods;
@@ -1694,6 +1828,249 @@ function poseR6Arm(g, S, T, roll){
   u.knuck.scale.set(w*1.14, w*0.34, hl*0.62);
   u.knuck.position.set(0, w*0.46, limbLen + hl*0.58);
 }
+/* ============================================================
+   OVERLAY RIG
+   The reference skins are not painted guns — they are a neutral
+   weapon wearing an emissive exoskeleton: ring collars, 4-point
+   sparkle stars, a crest fin, dashed orbit rings with travelling
+   dots, and a little LED counter. All of it moves.
+   Everything is generated from the weapon's own dimensions so one
+   declaration works across all five guns.
+   ============================================================ */
+function _emis(color, intensity){
+  const c = new THREE.Color(color);
+  c.multiplyScalar(intensity!=null? intensity : 0.60);
+  return new THREE.MeshBasicMaterial({ color:c, toneMapped:false });
+}
+function _emisSoft(color, opacity){
+  return new THREE.MeshBasicMaterial({ color:new THREE.Color(color), transparent:true,
+    opacity:opacity, blending:THREE.AdditiveBlending, depthWrite:false, toneMapped:false });
+}
+
+/* a flat 4-point sparkle, the shape stamped all over the reference gun */
+function sparkleGeo(size, thin){
+  const s = new THREE.Shape();
+  const a = size, b = size*(thin||0.13);
+  s.moveTo(0,a); s.quadraticCurveTo(b*0.5,b*0.5, a,0);
+  s.quadraticCurveTo(b*0.5,-b*0.5, 0,-a);
+  s.quadraticCurveTo(-b*0.5,-b*0.5, -a,0);
+  s.quadraticCurveTo(-b*0.5,b*0.5, 0,a);
+  return new THREE.ShapeGeometry(s, 6);
+}
+
+/* Dashed orbit ring as ONE geometry. Built as raw triangles because a
+   mesh per dash meant 24 extra draw calls per weapon, and there can be
+   two of these plus stars, rings and shards on a single gun. */
+const _dashCache = new Map();
+function dashedRingGeo(r, thick, dashes, fill){
+  const key = r.toFixed(4)+'|'+thick.toFixed(4)+'|'+dashes+'|'+fill;
+  if(_dashCache.has(key)) return _dashCache.get(key);
+  const pos=[], idx=[];
+  const seg = 3;                                  /* quads per dash */
+  let v=0;
+  for(let d=0; d<dashes; d++){
+    const a0 = d/dashes*TAU, span = TAU/dashes*fill;
+    for(let k=0;k<seg;k++){
+      const t0=a0+span*(k/seg), t1=a0+span*((k+1)/seg);
+      const c0=Math.cos(t0), s0=Math.sin(t0), c1=Math.cos(t1), s1=Math.sin(t1);
+      pos.push((r-thick)*c0,(r-thick)*s0,0, (r+thick)*c0,(r+thick)*s0,0,
+               (r+thick)*c1,(r+thick)*s1,0, (r-thick)*c1,(r-thick)*s1,0);
+      idx.push(v,v+1,v+2, v,v+2,v+3); v+=4;
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+  g.setIndex(idx);
+  g.userData.shared = true;
+  _dashCache.set(key,g);
+  return g;
+}
+
+function buildOverlay(root, sub, skin, W, float){
+  const O = skin.overlay;
+  if(!O) return;
+  const col = O.color || '#ff2040';
+  const fx = sub('fx');
+  const anim = [];
+  const bb = weaponSpan(W);
+  const midY = (bb.y0+bb.y1)*0.5;
+
+  /* --- ring collars around barrel + scope --- */
+  if(O.rings){
+    (W.cyl||[]).forEach(cy=>{
+      if(cy.mat==='glass' || cy.id==='reddot') return;
+      const n = O.rings.count || 2;
+      for(let i=0;i<n;i++){
+        const t = (i+1)/(n+1);
+        const x = cy.pos[0] - cy.len*0.5 + cy.len*t;
+        const r = Math.max(cy.r1,cy.r2)*1.14;
+        const m = new THREE.Mesh(new THREE.TorusGeometry(r, r*0.10, 6, 20), _emis(col));
+        m.position.set(x, cy.pos[1], cy.pos[2]);
+        m.rotation.y = Math.PI/2;
+        fx.add(m);
+        anim.push({m, kind:'pulse', p:i*0.7});
+      }
+    });
+  }
+
+  /* --- 4-point sparkle stars stamped along the weapon --- */
+  if(O.stars){
+    const mat = _emis(col);
+    (O.stars.at || [0.34, 0.62, 0.86]).forEach((t,i)=>{
+      const size = (O.stars.size || 0.030) * (i%2? 0.72 : 1);
+      const g = sparkleGeo(size);
+      for(const sgn of [1,-1]){
+        const m = new THREE.Mesh(g, mat);
+        m.position.set(bb.x0 + (bb.x1-bb.x0)*t, midY + (O.stars.y||0.01), sgn*(O.stars.z||0.030));
+        fx.add(m);
+        anim.push({m, kind:'twinkle', p:i*1.3, base:1});
+      }
+    });
+  }
+
+  /* A skin with bespoke geometry has already spent its silhouette
+     budget — stacking the generic crest and spikes on top of it is
+     what turns a weapon into a pile of shapes. */
+  const bespoke = !!(skin.mods && skin.mods.build);
+
+  /* --- crest fin above the receiver --- */
+  if(O.fin && !bespoke){
+    const h = O.fin.size || 0.05;
+    const s = new THREE.Shape();
+    s.moveTo(-h*0.9,0); s.lineTo(0,h*1.5); s.lineTo(h*0.9,0); s.lineTo(0,h*0.28);
+    const g = new THREE.ExtrudeGeometry(s,{depth:0.010,bevelEnabled:false});
+    g.translate(0,0,-0.005);
+    const m = new THREE.Mesh(g, _emis(col));
+    m.position.set(bb.x0+(bb.x1-bb.x0)*(O.fin.at||0.42), bb.y1*0.62, 0.026);
+    fx.add(m);
+    anim.push({m, kind:'pulse', p:0.4});
+  }
+
+  /* --- spikes off the receiver top --- */
+  if(O.spikes && !bespoke){
+    const mat = _emis(col);
+    const n = O.spikes.count || 4;
+    for(let i=0;i<n;i++){
+      const t = 0.30 + (i/(n-1))*0.22;
+      const g = new THREE.ConeGeometry((O.spikes.size||0.010)*0.8, (O.spikes.size||0.010)*2.6, 5);
+      const m = new THREE.Mesh(g, mat);
+      m.position.set(bb.x0+(bb.x1-bb.x0)*t, bb.y1*0.58, (i%2?1:-1)*0.030);
+      m.rotation.z = (i%2?1:-1)*0.16;
+      fx.add(m);
+    }
+  }
+
+  /* --- dashed orbit rings with travelling dots --- */
+  if(O.orbits){
+    const n = O.orbits.count || 2;
+    const dashMat = _emisSoft(col, 0.85);
+    const dotMat  = _emis(col);
+    for(let k=0;k<n;k++){
+      const grp = new THREE.Group();
+      const r = (O.orbits.r || 0.048) * (1 + k*0.35);
+      grp.add(new THREE.Mesh(dashedRingGeo(r, r*0.030, 9, 0.45), dashMat));
+      const dots = O.orbits.dots || 3;
+      const dotArr = [];
+      const dotGeo = new THREE.SphereGeometry(r*0.075, 6, 4);
+      dotGeo.userData.shared = true;
+      for(let d=0; d<dots; d++){
+        const s = new THREE.Mesh(dotGeo, dotMat);
+        grp.add(s); dotArr.push(s);
+      }
+      grp.position.set(bb.x0+(bb.x1-bb.x0)*((O.orbits.at||[0.18,0.55])[k] ?? 0.4),
+                       bb.y1*0.42, (k%2?1:-1)*0.075);
+      grp.rotation.x = 0.9 + k*0.5; grp.rotation.y = 0.4;
+      fx.add(grp);
+      anim.push({m:grp, kind:'orbit', r, dots:dotArr, sp:(k%2?1:-1)*(0.6+k*0.25)});
+    }
+  }
+
+  /* --- LED counter decal on the receiver side --- */
+  if(O.decal){
+    const cv = document.createElement('canvas'); cv.width=128; cv.height=40;
+    const c = cv.getContext('2d');
+    c.fillStyle='#120d02'; c.fillRect(0,0,128,40);
+    c.strokeStyle='#4a3a08'; c.lineWidth=3; c.strokeRect(2,2,124,36);
+    c.fillStyle='#ffd23a'; c.font='700 26px "Courier New",monospace';
+    c.fillText(O.decal===true? '00000' : O.decal, 12, 30);
+    const t = new THREE.CanvasTexture(cv); t.encoding = THREE.sRGBEncoding;
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(0.075,0.023),
+      new THREE.MeshBasicMaterial({map:t, toneMapped:false}));
+    m.position.set(bb.x0+(bb.x1-bb.x0)*0.44, midY+0.012, 0.029);
+    m.rotation.y = 0;
+    fx.add(m);
+    const m2 = m.clone(); m2.position.z = -0.029; m2.rotation.y = Math.PI; fx.add(m2);
+  }
+
+  /* --- swept crystal shards: the Apocalypse silhouette-breaker --- */
+  if(O.shards){
+    const n = O.shards.count || 5;
+    const glass = new THREE.MeshPhysicalMaterial({
+      color:new THREE.Color(O.shards.color || col), metalness:0.0, roughness:0.06,
+      transparent:true, opacity:O.shards.opacity!=null? O.shards.opacity*0.42 : 0.15,
+      emissive:new THREE.Color(O.shards.color || col), emissiveIntensity:0.40,
+      clearcoat:1, side:THREE.DoubleSide, envMapIntensity:2.0
+    });
+    for(let i=0;i<n;i++){
+      const f = i/(n-1||1);
+      const L = (O.shards.len||0.20) * 0.55 * (0.55 + (1-f)*0.9);
+      const sh = new THREE.Shape();
+      sh.moveTo(0,0); sh.lineTo(L, L*0.045); sh.lineTo(L*0.90, -L*0.075); sh.lineTo(0,-L*0.045);
+      const g = new THREE.ExtrudeGeometry(sh,{depth:0.003,bevelEnabled:false});
+      for(const sgn of [1,-1]){
+        const m = new THREE.Mesh(g, glass);
+        m.position.set(bb.x0 + (bb.x1-bb.x0)*(0.10+f*0.34),
+                       midY - 0.012 - f*0.010,
+                       sgn*(0.052+f*0.020));
+        m.rotation.z = Math.PI - 0.15 - f*0.30;     /* sweep backwards */
+        m.rotation.y = sgn*(0.55 + f*0.30);
+        fx.add(m);
+        anim.push({m, kind:'drift', p:i*0.9, bx:m.rotation.z});
+      }
+    }
+  }
+
+  root.userData.overlayAnim = anim;
+}
+
+/* bounding span of a weapon in its own local space */
+function weaponSpan(W){
+  if(W._span) return W._span;
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  (W.parts||[]).forEach(p=>p.pts.forEach(([x,y])=>{
+    x0=Math.min(x0,x); x1=Math.max(x1,x); y0=Math.min(y0,y); y1=Math.max(y1,y); }));
+  (W.cyl||[]).forEach(c=>{
+    x0=Math.min(x0,c.pos[0]-c.len/2); x1=Math.max(x1,c.pos[0]+c.len/2);
+    y0=Math.min(y0,c.pos[1]-c.r1);    y1=Math.max(y1,c.pos[1]+c.r1); });
+  W._span={x0,x1,y0,y1};
+  return W._span;
+}
+
+/* driven every frame from Player.animateViewmodel */
+function tickOverlay(root, t){
+  const a = root.userData.overlayAnim;
+  if(!a) return;
+  for(let i=0;i<a.length;i++){
+    const o=a[i];
+    if(o.kind==='pulse'){
+      const k = 0.75 + Math.sin(t*2.2 + o.p)*0.25;
+      o.m.scale.setScalar(k);
+    } else if(o.kind==='twinkle'){
+      const k = 0.55 + Math.abs(Math.sin(t*1.6 + o.p))*0.75;
+      o.m.scale.set(k, k, 1);
+      o.m.rotation.z = t*0.35 + o.p;
+    } else if(o.kind==='orbit'){
+      o.m.rotation.z = t*o.sp;
+      for(let d=0; d<o.dots.length; d++){
+        const ang = t*o.sp*2.2 + d*(TAU/o.dots.length);
+        o.dots[d].position.set(Math.cos(ang)*o.r, Math.sin(ang)*o.r, 0);
+      }
+    } else if(o.kind==='drift'){
+      o.m.rotation.z = o.bx + Math.sin(t*0.8 + o.p)*0.05;
+    }
+  }
+}
+
 /* ---- shared helpers usable by skin mods ---------------------------- */
 const ModKit = {
   glowMat(color, intensity){
@@ -1840,13 +2217,30 @@ function simpleSkin(o){
   return Object.assign({
     paint(P){
       switch(P.part){
-        case 'grip':   gripTexture(P, o.gripCol || shade(o.col,-0.22)); break;
-        case 'wood':   o.woodCols? woodTexture(P,o.woodCols[0],o.woodCols[1]) : polymer(P, o.col, o.gloss); break;
-        case 'mag':    polymer(P, o.magCol || shade(o.col,-0.10), o.gloss); break;
-        case 'accent': polymer(P, o.accentCol || '#23262c'); P.panelLines('rgba(0,0,0,0.4)',2); break;
+        case 'grip':
+          P.fill(o.gripCol || shade(o.col,-0.22));
+          P.knurl(); P.grain(0.035);
+          break;
+        case 'wood':
+          o.woodCols? woodTexture(P,o.woodCols[0],o.woodCols[1]) : polymer(P, o.col, o.gloss);
+          P.panelCut(0.78, 0.5);
+          break;
+        case 'mag':
+          polymer(P, o.magCol || shade(o.col,-0.10), o.gloss);
+          if(o.pattern) o.pattern(P);
+          for(let i=0;i<4;i++) P.panelCut(0.22+i*0.18, 0.45);
+          break;
+        case 'accent':
+          polymer(P, o.accentCol || '#23262c');
+          P.panelCut(0.30,0.7); P.bolts(4, 0.66, 0.014);
+          break;
         default:
           polymer(P, o.col, o.gloss);
           if(o.pattern) o.pattern(P);
+          /* machining passes go OVER the pattern, the way real hardware reads */
+          P.panelCut(0.26, 0.55);
+          P.bolts(5, 0.16, 0.011);
+          P.vents(4, 0.62, 0.045, 0.11);
       }
     }
   }, o);
@@ -1914,6 +2308,13 @@ add(simpleSkin({id:'kr47_bloomsplash', name:'Bloom Splash', weapon:'kr47', rarit
 /* classified: custom flash + tracer */
 add({
   id:'kr47_neurograph', name:'Neurograph', weapon:'kr47', rarity:'classified',
+  emissive:'#ffffff', emissiveIntensity:1.45,
+  paintEmissive(P){
+    P.traceOutline('#1ef0cf', 0.055, 0.013);
+    P.traceRun('#1ef0cf', [[0.05,0.66],[0.26,0.54],[0.48,0.68],[0.70,0.52],[0.95,0.64]], 0.010, 0.014);
+  },
+  overlay:{ color:'#1ef0cf', rings:{count:2}, stars:{at:[0.36,0.68], size:0.026},
+            orbits:{count:2, r:0.044, dots:3, at:[0.16,0.54]}, decal:'NEURO' },
   emissive:'#25f0d0', emissiveKinds:['body','wood','mag'], emissiveIntensity:0.55,
   metalOverride:0.42, roughMul:0.58, envBoost:1.5,
   vfx:{
@@ -1934,6 +2335,14 @@ add({
 /* ---- COVERT: geometry, light, custom impact ---- */
 add({
   id:'kr47_wraithcoil', name:'Wraithcoil', weapon:'kr47', rarity:'covert',
+  emissive:'#ffffff', emissiveIntensity:1.55,
+  paintEmissive(P){
+    P.traceOutline('#a86bff', 0.05, 0.014);
+    P.traceRun('#a86bff', [[0.05,0.68],[0.28,0.52],[0.52,0.70],[0.76,0.54],[0.96,0.66]], 0.011, 0.017);
+  },
+  overlay:{ color:'#a86bff', rings:{count:3}, stars:{at:[0.32,0.62,0.88], size:0.032},
+            fin:{at:0.38,size:0.05}, spikes:{count:4,size:0.009},
+            orbits:{count:2, r:0.052, dots:4, at:[0.15,0.52]}, decal:'WRAITH' },
   emissive:'#8a4bff', emissiveKinds:['accent'], emissiveIntensity:1.4,
   metalOverride:0.85, roughMul:0.45, envBoost:2.0, baseMetal:'#2a2233',
   vfx:{
@@ -1985,6 +2394,15 @@ add({
 /* ---- EXOTIC: the gun becomes a different object ---- */
 add({
   id:'kr47_dragonmaw', name:"Dragon's Maw", weapon:'kr47', rarity:'exotic',
+  emissive:'#ffffff', emissiveIntensity:1.7,
+  paintEmissive(P){
+    P.traceOutline('#ff6a10', 0.05, 0.015);
+    P.traceRun('#ff8a20', [[0.05,0.70],[0.26,0.52],[0.50,0.72],[0.74,0.52],[0.96,0.68]], 0.012, 0.018);
+  },
+  overlay:{ color:'#ff6a10', rings:{count:3}, stars:{at:[0.30,0.60,0.88], size:0.034},
+            fin:{at:0.36,size:0.055}, spikes:{count:5,size:0.010},
+            orbits:{count:2, r:0.055, dots:4, at:[0.14,0.50]}, decal:true,
+            shards:{count:4, len:0.17, color:'#ff9a3a', opacity:0.34} },
   metalOverride:0.55, roughMul:0.62, envBoost:1.05, baseMetal:'#5a3a10',
   emissive:'#ff6a10', emissiveKinds:['accent'], emissiveIntensity:0.7, maxFloat:0.55,
   vfx:{
@@ -2097,6 +2515,10 @@ add(simpleSkin({id:'mx4_hazmat', name:'Hazmat', weapon:'mx4', rarity:'restricted
 /* classified — painted chrome, iridescent film */
 add({
   id:'mx4_prism', name:'Prism', weapon:'mx4', rarity:'classified',
+  emissive:'#ffffff', emissiveIntensity:1.25,
+  paintEmissive(P){ P.traceOutline('#7de0ff', 0.05, 0.011); },
+  overlay:{ color:'#9ae8ff', rings:{count:3}, stars:{at:[0.30,0.55,0.82], size:0.028},
+            orbits:{count:1, r:0.05, dots:4, at:[0.30]} },
   metalOverride:0.50, roughMul:0.50, envBoost:1.10, baseMetal:'#8a8f9a',
   vfx:{
     flash:{shape:'shard', core:'#ffffff', corona:'#7de0ff', coronaScale:1.8, light:'#bfe9ff'},
@@ -2115,6 +2537,14 @@ add({
 /* covert — void rift */
 add({
   id:'mx4_nullpoint', name:'Nullpoint', weapon:'mx4', rarity:'covert',
+  emissive:'#ffffff', emissiveIntensity:1.55,
+  paintEmissive(P){
+    P.traceOutline('#e07bff', 0.05, 0.014);
+    P.traceRun('#e07bff', [[0.06,0.60],[0.30,0.74],[0.56,0.56],[0.84,0.70],[0.97,0.58]], 0.011, 0.017);
+  },
+  overlay:{ color:'#c04bff', rings:{count:3}, stars:{at:[0.28,0.58,0.86], size:0.030},
+            fin:{at:0.36,size:0.048}, spikes:{count:4,size:0.009},
+            orbits:{count:2, r:0.05, dots:4, at:[0.16,0.50]}, decal:'NULL' },
   emissive:'#c04bff', emissiveKinds:['accent','mag'], emissiveIntensity:1.1,
   metalOverride:0.5, roughMul:0.5, envBoost:1.8, baseMetal:'#1a1424',
   vfx:{
@@ -2160,6 +2590,15 @@ add({
 /* exotic — holy relic */
 add({
   id:'mx4_seraph', name:'Seraph', weapon:'mx4', rarity:'exotic',
+  emissive:'#ffffff', emissiveIntensity:1.6,
+  paintEmissive(P){
+    P.traceOutline('#ffe9a8', 0.05, 0.014);
+    P.traceRun('#fff2c8', [[0.06,0.66],[0.30,0.52],[0.56,0.70],[0.82,0.54],[0.97,0.64]], 0.011, 0.017);
+  },
+  overlay:{ color:'#ffe9a8', rings:{count:3}, stars:{at:[0.28,0.58,0.86], size:0.034},
+            fin:{at:0.34,size:0.055}, spikes:{count:4,size:0.009},
+            orbits:{count:2, r:0.052, dots:4, at:[0.16,0.52]}, decal:true,
+            shards:{count:5, len:0.19, color:'#fff4d0', opacity:0.30} },
   metalOverride:0.45, roughMul:0.58, envBoost:1.00, baseMetal:'#b9a06a',
   emissive:'#ffe9a8', emissiveKinds:['accent'], emissiveIntensity:0.85, maxFloat:0.5,
   vfx:{
@@ -2287,6 +2726,12 @@ add(simpleSkin({id:'hornet_venom', name:'Venom', weapon:'hornet', rarity:'restri
 /* classified — painted gold hex chrome */
 add({
   id:'hornet_swarm', name:'Swarm', weapon:'hornet', rarity:'classified',
+  emissive:'#ffffff', emissiveIntensity:1.30,
+  paintEmissive(P){
+    P.traceOutline('#ffcf3a', 0.055, 0.012);
+    P.traceRun('#ffcf3a', [[0.08,0.60],[0.32,0.72],[0.56,0.56],[0.86,0.68]], 0.010, 0.014);
+  },
+  overlay:{ color:'#ffcf3a', rings:{count:2}, stars:{at:[0.40,0.74], size:0.024}, decal:'SWARM' },
   metalOverride:0.48, roughMul:0.55, envBoost:1.05, baseMetal:'#7d6a34',
   vfx:{
     flash:{shape:'star', core:'#fff4cf', corona:'#f0cd55', coronaScale:1.8, light:'#ffd970'},
@@ -2304,6 +2749,14 @@ add({
 /* covert — living hive */
 add({
   id:'hornet_hivemind', name:'Hivemind', weapon:'hornet', rarity:'covert',
+  emissive:'#ffffff', emissiveIntensity:1.50,
+  paintEmissive(P){
+    P.traceOutline('#ffb300', 0.055, 0.013);
+    P.traceRun('#ffb300', [[0.08,0.64],[0.34,0.50],[0.60,0.66],[0.90,0.52]], 0.011, 0.016);
+  },
+  overlay:{ color:'#ffb300', rings:{count:2}, stars:{at:[0.34,0.66], size:0.028},
+            fin:{at:0.34,size:0.042}, spikes:{count:3,size:0.008},
+            orbits:{count:2, r:0.042, dots:3, at:[0.18,0.56]}, decal:'HIVE' },
   emissive:'#ffb300', emissiveKinds:['accent','mag'], emissiveIntensity:1.3,
   metalOverride:0.75, roughMul:0.4, envBoost:2.0, baseMetal:'#33280d',
   vfx:{
@@ -2358,6 +2811,15 @@ add({
 /* exotic — insectoid */
 add({
   id:'hornet_stinger', name:'Stinger', weapon:'hornet', rarity:'exotic',
+  emissive:'#ffffff', emissiveIntensity:1.6,
+  paintEmissive(P){
+    P.traceOutline('#9dff3d', 0.055, 0.014);
+    P.traceRun('#c8ff7a', [[0.08,0.62],[0.34,0.74],[0.62,0.54],[0.92,0.68]], 0.011, 0.017);
+  },
+  overlay:{ color:'#9dff3d', rings:{count:2}, stars:{at:[0.34,0.66], size:0.030},
+            fin:{at:0.32,size:0.046}, spikes:{count:4,size:0.009},
+            orbits:{count:2, r:0.044, dots:4, at:[0.18,0.56]}, decal:true,
+            shards:{count:4, len:0.15, color:'#b6ff6a', opacity:0.32} },
   metalOverride:0.50, roughMul:0.55, envBoost:1.15, baseMetal:'#2a3a1a',
   emissive:'#9dff3d', emissiveKinds:['accent'], emissiveIntensity:1.0, maxFloat:0.5,
   vfx:{
@@ -2486,6 +2948,13 @@ add(simpleSkin({id:'reaper_carbon', name:'Carbon Weave', weapon:'reaper', rarity
 /* classified — arcane glyph optics */
 add({
   id:'reaper_oracle', name:'Oracle', weapon:'reaper', rarity:'classified',
+  emissive:'#ffffff', emissiveIntensity:1.45,
+  paintEmissive(P){
+    P.traceOutline('#39d7ff', 0.05, 0.012);
+    P.traceRun('#39d7ff', [[0.06,0.70],[0.30,0.56],[0.54,0.70],[0.80,0.56],[0.97,0.66]], 0.010, 0.015);
+  },
+  overlay:{ color:'#39d7ff', rings:{count:3}, stars:{at:[0.28,0.60,0.88], size:0.030},
+            fin:{at:0.40,size:0.045}, orbits:{count:2, r:0.05, dots:3, at:[0.14,0.50]} },
   emissive:'#39d7ff', emissiveKinds:['body','accent'], emissiveIntensity:0.6,
   metalOverride:0.6, roughMul:0.4, envBoost:2.0, baseMetal:'#1b2833',
   vfx:{
@@ -2516,6 +2985,14 @@ add({
 /* covert — event horizon */
 add({
   id:'reaper_singularity', name:'Singularity', weapon:'reaper', rarity:'covert',
+  emissive:'#ffffff', emissiveIntensity:1.60,
+  paintEmissive(P){
+    P.traceOutline('#8ed6ff', 0.05, 0.014);
+    P.traceRun('#8ed6ff', [[0.05,0.70],[0.28,0.54],[0.52,0.72],[0.78,0.54],[0.97,0.68]], 0.011, 0.018);
+  },
+  overlay:{ color:'#4aa8ff', rings:{count:3}, stars:{at:[0.26,0.58,0.88], size:0.034},
+            fin:{at:0.38,size:0.052}, spikes:{count:4,size:0.010},
+            orbits:{count:2, r:0.055, dots:4, at:[0.13,0.50]}, decal:'EVENT-H' },
   emissive:'#4aa8ff', emissiveKinds:['accent'], emissiveIntensity:1.2,
   metalOverride:0.9, roughMul:0.3, envBoost:2.4, baseMetal:'#141820',
   vfx:{
@@ -2571,6 +3048,15 @@ add({
 /* exotic — directed energy */
 add({
   id:'reaper_lightlance', name:'Lightlance', weapon:'reaper', rarity:'exotic',
+  emissive:'#ffffff', emissiveIntensity:1.7,
+  paintEmissive(P){
+    P.traceOutline('#7fd4ff', 0.05, 0.015);
+    P.traceRun('#cfefff', [[0.05,0.70],[0.30,0.54],[0.55,0.72],[0.80,0.54],[0.97,0.66]], 0.012, 0.018);
+  },
+  overlay:{ color:'#7fd4ff', rings:{count:4}, stars:{at:[0.26,0.56,0.86], size:0.036},
+            fin:{at:0.36,size:0.058}, spikes:{count:5,size:0.010},
+            orbits:{count:2, r:0.058, dots:5, at:[0.13,0.48]}, decal:true,
+            shards:{count:6, len:0.21, color:'#d8f4ff', opacity:0.30} },
   metalOverride:0.42, roughMul:0.55, envBoost:0.95, baseMetal:'#c8d8e8',
   emissive:'#e8faff', emissiveKinds:['accent'], emissiveIntensity:1.2, maxFloat:0.45,
   vfx:{
@@ -2680,6 +3166,13 @@ add(simpleSkin({id:'sidewinder_deco', name:'Deco', weapon:'sidewinder', rarity:'
 /* classified — neon city */
 add({
   id:'sidewinder_cyberpunk', name:'Neon District', weapon:'sidewinder', rarity:'classified',
+  emissive:'#ffffff', emissiveIntensity:1.40,
+  paintEmissive(P){
+    P.traceOutline('#00e5ff', 0.06, 0.014);
+    P.traceRun('#ff2fb0', [[0.10,0.66],[0.40,0.52],[0.70,0.68],[0.94,0.56]], 0.011, 0.016);
+  },
+  overlay:{ color:'#00e5ff', rings:{count:1}, stars:{at:[0.55,0.88], size:0.022},
+            orbits:{count:1, r:0.038, dots:3, at:[0.34]}, decal:'CY-01' },
   emissive:'#ff2fb0', emissiveKinds:['body','accent'], emissiveIntensity:0.75,
   metalOverride:0.7, roughMul:0.32, envBoost:2.2, baseMetal:'#20182a',
   vfx:{
@@ -2701,6 +3194,13 @@ add({
 /* covert — hard light */
 add({
   id:'sidewinder_phantom', name:'Phantom', weapon:'sidewinder', rarity:'covert',
+  emissive:'#ffffff', emissiveIntensity:1.50,
+  paintEmissive(P){
+    P.traceOutline('#7ef9ff', 0.06, 0.015);
+    P.traceRun('#7ef9ff', [[0.10,0.64],[0.42,0.50],[0.72,0.66],[0.95,0.54]], 0.012, 0.017);
+  },
+  overlay:{ color:'#7ef9ff', rings:{count:1}, stars:{at:[0.52,0.86], size:0.024},
+            orbits:{count:2, r:0.038, dots:3, at:[0.28,0.62]}, decal:'PH-9' },
   emissive:'#7ef9ff', emissiveKinds:['accent','mag','body'], emissiveIntensity:0.9,
   metalOverride:0.4, roughMul:0.25, envBoost:2.6, baseMetal:'#1c2a30',
   vfx:{
@@ -2750,6 +3250,14 @@ add({
 /* exotic — regalia */
 add({
   id:'sidewinder_kingsransom', name:"King's Ransom", weapon:'sidewinder', rarity:'exotic',
+  emissive:'#ffffff', emissiveIntensity:1.55,
+  paintEmissive(P){
+    P.traceOutline('#ffd970', 0.06, 0.015);
+    P.traceRun('#fff0b8', [[0.10,0.64],[0.40,0.50],[0.70,0.66],[0.95,0.54]], 0.012, 0.017);
+  },
+  overlay:{ color:'#ffd970', rings:{count:2}, stars:{at:[0.50,0.86], size:0.026},
+            orbits:{count:2, r:0.040, dots:4, at:[0.26,0.62]}, decal:true,
+            shards:{count:3, len:0.11, color:'#ffe9a8', opacity:0.32} },
   metalOverride:0.45, roughMul:0.58, envBoost:0.95, baseMetal:'#8a6d1e',
   emissive:'#ffd970', emissiveKinds:[], emissiveIntensity:0.4, maxFloat:0.45,
   vfx:{
@@ -3557,7 +4065,7 @@ const Scene = {
     const VS = `varying vec2 vUv; void main(){ vUv=uv; gl_Position=vec4(position.xy,0.0,1.0); }`;
 
     this.passes.bright = new THREE.ShaderMaterial({
-      uniforms:{ tD:{value:null}, thr:{value:1.05}, soft:{value:0.55} },
+      uniforms:{ tD:{value:null}, thr:{value:0.82}, soft:{value:0.50} },
       vertexShader:VS,
       fragmentShader:`
         uniform sampler2D tD; uniform float thr; uniform float soft; varying vec2 vUv;
@@ -3584,7 +4092,7 @@ const Scene = {
     this.passes.comp = new THREE.ShaderMaterial({
       uniforms:{
         tD:{value:null}, tB:{value:null}, tB2:{value:null},
-        strength:{value:0.52}, exposure:{value:0.80},
+        strength:{value:0.62}, exposure:{value:0.80},
         vig:{value:0.50}, aber:{value:0.0011}, time:{value:0}, shake:{value:0}
       },
       vertexShader:VS,
@@ -4368,6 +4876,7 @@ const Player = {
     const g = this.gunRoot.userData.groups;
     const mods = this.gunRoot.userData.mods || {};
     if(mods.tick) mods.tick(this.gunRoot, time);
+    tickOverlay(this.gunRoot, time);
 
     /* --- base pose --- */
     const vm = W.vm || {hand:[0.12,-0.15,-0.30], scale:1, adsZ:-0.26};
@@ -4611,6 +5120,17 @@ function drawItemIcon(cv, item, opts){
     lg.addColorStop(0.38,'rgba(255,255,255,0.01)');
     lg.addColorStop(1,'rgba(0,0,0,0.30)');
     ctx.fillStyle=lg; ctx.fillRect(bx,by,bw,bh);
+    /* the emissive channel again, added on top — otherwise a skin whose
+       whole identity is glowing tracery looks dead in the inventory */
+    if(skin.paintEmissive){
+      const ecv = skinCanvas(skin, kind, item.float, 384, 'e');
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.drawImage(ecv, bx, by, bw, bh);
+      ctx.globalAlpha = 0.5;
+      ctx.drawImage(ecv, bx, by, bw, bh);
+      ctx.globalAlpha = 1;
+      ctx.globalCompositeOperation = 'source-over';
+    }
     ctx.restore();
     ctx.save(); path();
     ctx.strokeStyle='rgba(0,0,0,0.55)'; ctx.lineWidth=Math.max(1,s*0.004); ctx.stroke();
