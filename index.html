@@ -1732,6 +1732,11 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
     return root.userData.groups[n];
   };
   sub('static'); sub('mag'); sub('bolt'); sub('slide'); sub('fx');
+  /* Named pivots let a part rotate about a real hinge — the balisong's
+     handles turn on the tang pin, not about the weapon's origin. */
+  const PIV = W.pivots || null;
+  if(PIV) for(const k in PIV){ sub(k).position.fromArray(PIV[k]); }
+  const pivOf = n => (PIV && n && PIV[n]) || null;
 
   const hidden = new Set(mods.hide||[]);
   const parts = (W.parts||[]).concat(mods.addParts||[]);
@@ -1744,7 +1749,9 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
     const m = makeMaterial(skin, def.kindOverride||def.kind, def.mat, float);
     const mesh = new THREE.Mesh(geo, m);
     mesh.name = def.id;
-    mesh.position.z = def.z||0;
+    const pv = pivOf(def.anim);
+    if(pv) mesh.position.set(-pv[0], -pv[1], (def.z||0) - pv[2]);
+    else   mesh.position.z = def.z||0;
     mesh.castShadow = true;
     sub(def.anim||'static').add(mesh);
   });
@@ -1763,6 +1770,18 @@ function buildWeaponModel(weaponId, inst, opts_noArms){
     mesh.castShadow = true;
     if(m.map){ m.map.repeat.set(3,1); }
     sub(def.anim||'static').add(mesh);
+  });
+
+  /* torus rings — a karambit's finger ring, mostly */
+  (W.rings||[]).forEach(rg=>{
+    const geo = new THREE.TorusGeometry(rg.r, rg.t, 8, 22);
+    geo.rotateY(Math.PI/2);
+    const m = makeMaterial(skin, rg.kindOverride||rg.kind, rg.mat, float);
+    const mesh = new THREE.Mesh(geo, m);
+    mesh.name = rg.id;
+    mesh.position.set(rg.pos[0], rg.pos[1], rg.pos[2]);
+    mesh.castShadow = true;
+    sub(rg.anim||'static').add(mesh);
   });
 
   /* --- skin-driven extra geometry (covert / exotic tiers) --- */
@@ -2066,7 +2085,8 @@ function buildOverlay(root, sub, skin, W, float){
     const tex = new THREE.CanvasTexture(cv);
     const mat = new THREE.MeshBasicMaterial({map:tex, color:new THREE.Color(col).multiplyScalar(0.8),
       transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, toneMapped:false, side:THREE.DoubleSide});
-    const g = new THREE.PlaneGeometry(0.034,0.034); g.userData.shared = true;
+    const rs = O.runes.size || 0.034;
+    const g = new THREE.PlaneGeometry(rs,rs); g.userData.shared = true;
     for(let i=0;i<n;i++){
       for(const sgn of [1,-1]){
         const m = new THREE.Mesh(g, mat);
@@ -2312,6 +2332,194 @@ const ModKit = {
     return m;
   }
 };
+
+
+/* ===== 35_knives.js ===== */
+/* ============================================================
+   MELEE
+
+   A knife cannot do much — it swings. So everything that makes one
+   worth owning lives in the equip and the inspect, which is exactly
+   how VALORANT treats them: the butterfly knife's whole appeal is
+   the flip, and the karambit's is the finger spin.
+
+   Both of those are real mechanisms, so both are modelled as real
+   mechanisms rather than faked with a canned rotation:
+
+     · the balisong has two handles on a shared pivot at the tang,
+       and they are separate animation groups, so the fan, the
+       aerial and the close are driven by actual handle angles.
+     · the karambit rotates around its finger ring, so the pivot is
+       moved to the ring's centre and the wrist stays put — the way
+       it works on a real finger.
+   ============================================================ */
+
+WEAPONS.balisong = {
+  name:'Balisong', class:'Melee', melee:true,
+  mag:0, rpm:150, dmg:55, hs:2.0, stabDmg:120, reach:2.4,
+  spread:0, recoil:[0,0], reload:0, adsFov:70, adsTime:0.16,
+  sfx:{body:520, bright:5200, len:0.10, vol:0.45},
+  vm:{ hand:[0.132,-0.108,-0.215], scale:1.75, adsZ:-0.30 },
+  hands:{ r:[-0.032,-0.004,-0.010], l:[-0.030,-0.010,-0.010] },
+  /* both handles swing about the tang pin */
+  pivots:{ handleA:[0.050, 0.000,  0.013], handleB:[0.050, 0.000, -0.013] },
+  parts:[
+    {id:'blade', kind:'body', mat:'steel', depth:0.005, radius:0.002, pts:[
+      [0.050,0.015],[0.150,0.013],[0.205,0.005],[0.222,-0.001],[0.180,-0.013],[0.050,-0.016]]},
+    {id:'edge', kind:'accent', mat:'steel', depth:0.006, radius:0.001, pts:[
+      [0.060,-0.010],[0.185,-0.009],[0.220,-0.001],[0.176,-0.014],[0.060,-0.015]]},
+    {id:'tang', kind:'accent', mat:'metal', depth:0.013, radius:0.003, pts:[
+      [0.030,0.017],[0.058,0.017],[0.058,-0.018],[0.030,-0.018]]},
+    {id:'handleA', anim:'handleA', kind:'grip', mat:'metal', depth:0.010, radius:0.004, pts:[
+      [-0.104,0.012],[0.052,0.014],[0.052,-0.014],[-0.104,-0.012]]},
+    {id:'handleAcut', anim:'handleA', kind:'accent', mat:'steel', depth:0.011, radius:0.002, pts:[
+      [-0.070,0.007],[-0.010,0.008],[-0.010,-0.008],[-0.070,-0.007]]},
+    {id:'handleB', anim:'handleB', kind:'grip', mat:'metal', depth:0.010, radius:0.004, pts:[
+      [-0.104,0.012],[0.052,0.014],[0.052,-0.014],[-0.104,-0.012]]},
+    {id:'handleBcut', anim:'handleB', kind:'accent', mat:'steel', depth:0.011, radius:0.002, pts:[
+      [-0.070,0.007],[-0.010,0.008],[-0.010,-0.008],[-0.070,-0.007]]},
+    {id:'latch', anim:'handleA', kind:'accent', mat:'steel', depth:0.006, radius:0.002, pts:[
+      [-0.112,0.015],[-0.086,0.015],[-0.086,-0.015],[-0.112,-0.015]]}
+  ],
+  cyl:[
+    {id:'pin', kind:'accent', mat:'steel', r1:0.005, r2:0.005, len:0.032, pos:[0.050,0.000,0]}
+  ],
+  muzzle:[0.225,0.000,0]
+};
+
+WEAPONS.talon = {
+  name:'Talon', class:'Melee', melee:true,
+  mag:0, rpm:150, dmg:60, hs:2.0, stabDmg:130, reach:2.2,
+  spread:0, recoil:[0,0], reload:0, adsFov:70, adsTime:0.16,
+  sfx:{body:470, bright:4600, len:0.11, vol:0.45},
+  vm:{ hand:[0.126,-0.100,-0.205], scale:1.95, adsZ:-0.28 },
+  hands:{ r:[-0.014,-0.008,-0.010], l:[-0.016,-0.014,-0.010] },
+  /* the finger ring is the pivot the whole knife spins around */
+  ringPivot:[-0.052,-0.004,0],
+  parts:[
+    {id:'blade', kind:'body', mat:'steel', depth:0.005, radius:0.003, pts:[
+      [0.010,0.016],[0.070,0.030],[0.126,0.026],[0.156,0.004],
+      [0.128,0.012],[0.076,0.014],[0.020,-0.002]]},
+    {id:'edge', kind:'accent', mat:'steel', depth:0.006, radius:0.002, pts:[
+      [0.066,0.030],[0.126,0.026],[0.156,0.004],[0.126,0.014],[0.070,0.019]]},
+    {id:'handle', kind:'grip', mat:'metal', depth:0.014, radius:0.005, pts:[
+      [-0.048,0.014],[0.014,0.018],[0.020,-0.004],[-0.046,-0.012]]},
+    {id:'guard', kind:'accent', mat:'metal', depth:0.017, radius:0.004, pts:[
+      [0.008,0.020],[0.026,0.020],[0.028,-0.008],[0.008,-0.008]]}
+  ],
+  rings:[
+    {id:'fingerring', kind:'accent', mat:'metal', r:0.020, t:0.005, pos:[-0.052,-0.004,0]}
+  ],
+  cyl:[],
+  muzzle:[0.160,0.006,0]
+};
+
+WEAPON_ORDER.push('balisong','talon');
+const MELEE_ORDER = ['balisong','talon'];
+
+/* ---------------------------------------------------------------
+   Knife finishes. Cheap ones are honest steel; the top tiers get
+   the same emissive exoskeleton the rifles wear.
+   --------------------------------------------------------------- */
+function bladeSteel(P, tint, polish){
+  P.fill(tint || '#9aa3ad');
+  P.chrome(tint || '#c3ccd6', shade(tint || '#6d757e', -0.10), '#ffffff', 0.42, 2);
+  P.brushed(polish==null? 0.12 : polish, true);
+}
+
+const KNIFE_SKINS = [
+  { id:'balisong_default', name:'Carbon', weapon:'balisong', rarity:'consumer',
+    metalOverride:0.9, roughMul:0.55, envBoost:1.0,
+    paint(P){
+      if(P.part==='grip'){ P.fill('#23272d'); P.knurl(); P.panelCut(0.5,0.6); return; }
+      bladeSteel(P, '#8e97a1');
+    }},
+  { id:'talon_default', name:'Blacksteel', weapon:'talon', rarity:'consumer',
+    metalOverride:0.9, roughMul:0.55, envBoost:1.0,
+    paint(P){
+      if(P.part==='grip'){ P.fill('#1c2026'); P.knurl(); return; }
+      bladeSteel(P, '#6f7883', 0.14);
+    }},
+
+  { id:'balisong_marbled', name:'Marbled Fade', weapon:'balisong', rarity:'restricted',
+    metalOverride:0.85, roughMul:0.42, envBoost:1.3,
+    vfx:{ tracer:{color:'#ff7ad0'} },
+    paint(P){
+      if(P.part==='grip'){ P.fill('#2a2028'); P.knurl(); return; }
+      P.fade(['#ff2d6f','#ffd400','#00d0ff'], 0.25);
+      P.marble(['#ffffff','#2a1030'], 22);
+      P.sheen(0.30);
+    }},
+  { id:'talon_tigertooth', name:'Tigertooth', weapon:'talon', rarity:'restricted',
+    metalOverride:0.9, roughMul:0.35, envBoost:1.5,
+    paint(P){
+      if(P.part==='grip'){ P.fill('#2a220c'); P.knurl(); return; }
+      P.chrome('#ffcf4a','#8a6410','#fff3c0',0.44,2);
+      P.tiger('#241a04', 6, 0.18);
+    }},
+
+  { id:'balisong_doppler', name:'Doppler', weapon:'balisong', rarity:'covert',
+    metalOverride:0.8, roughMul:0.30, envBoost:1.6,
+    emissive:'#ffffff', emissiveIntensity:1.35,
+    vfx:{ impact:{color:'#8a6bff', burst:true, scale:0.8} },
+    paint(P){
+      if(P.part==='grip'){ P.fill('#141024'); P.knurl(); return; }
+      P.galaxy(['#5b1fd8','#1f4ba8','#c81f9c'], 120);
+      P.overlayMode('screen', p=> p.marble(['#a86bff','#3fd2ff'], 20));
+      P.sheen(0.26);
+    },
+    paintEmissive(P){ if(P.part!=='grip') P.traceOutline('#a86bff', 0.06, 0.012); },
+    overlay:{ color:'#a86bff', motes:{count:9,size:0.0026}, stars:{at:[0.55,0.80], size:0.011, z:0.013} }},
+
+  { id:'talon_gamma', name:'Gamma Wave', weapon:'talon', rarity:'covert',
+    metalOverride:0.8, roughMul:0.30, envBoost:1.6,
+    emissive:'#ffffff', emissiveIntensity:1.4,
+    vfx:{ impact:{color:'#43ff8a', burst:true, scale:0.8} },
+    paint(P){
+      if(P.part==='grip'){ P.fill('#0e1a12'); P.knurl(); return; }
+      P.fill('#07130c');
+      P.marble(['#1eff7a','#0a6b3a','#a8ffd0'], 30);
+      P.overlayMode('screen', p=> p.radial('rgba(30,255,122,0.35)','rgba(0,0,0,0)',0.5,0.5,0.7));
+    },
+    paintEmissive(P){ if(P.part!=='grip') P.traceOutline('#1eff7a', 0.06, 0.013); },
+    overlay:{ color:'#1eff7a', coils:{turns:3,len:0.11,at:0.32,r:0.009}, motes:{count:8,size:0.0026} }},
+
+  { id:'balisong_ruination', name:'Ruination', weapon:'balisong', rarity:'exotic',
+    metalOverride:0.75, roughMul:0.28, envBoost:1.7, maxFloat:0.45,
+    emissive:'#ffffff', emissiveIntensity:1.7,
+    vfx:{ impact:{color:'#2fe0a8', burst:true, scale:1.1}, casing:false },
+    paint(P){
+      if(P.part==='grip'){ P.fill('#0b1118'); P.knurl(); P.marble(['#2fe0a8','#0d3a2c'],14); return; }
+      P.fill('#08111a');
+      P.marble(['#2fe0a8','#0fa37f','#8a7434'], 34);
+      P.overlayMode('screen', p=> p.fade(['rgba(47,224,168,0.34)','rgba(0,0,0,0)','rgba(138,116,52,0.30)'],0.4));
+      P.filigree('#8a7434', 5, 0.10);
+      P.vignette(0.5);
+    },
+    paintEmissive(P){
+      P.traceOutline('#2fe0a8', 0.055, 0.014);
+      if(P.part!=='grip') P.traceRun('#2fe0a8', [[0.10,0.62],[0.40,0.48],[0.70,0.64],[0.94,0.52]], 0.010, 0.015);
+    },
+    overlay:{ color:'#2fe0a8', halo:{r:0.015,at:0.78}, motes:{count:12,size:0.003},
+              runes:{count:2, size:0.017}, decal:'RUIN' }},
+
+  { id:'talon_solstice', name:'Solstice', weapon:'talon', rarity:'exotic',
+    metalOverride:0.75, roughMul:0.26, envBoost:1.7, maxFloat:0.45,
+    emissive:'#ffffff', emissiveIntensity:1.7,
+    vfx:{ impact:{color:'#ffb43a', burst:true, scale:1.1}, casing:false },
+    paint(P){
+      if(P.part==='grip'){ P.fill('#241505'); P.knurl(); return; }
+      P.chrome('#ffe0a0','#7a4a08','#fff6dc', 0.44, 3);
+      P.filigree('#fff0b8', 8, 0.085);
+      P.overlayMode('multiply', p=> p.vignette(0.35));
+    },
+    paintEmissive(P){
+      P.traceOutline('#ffb43a', 0.055, 0.014);
+      if(P.part!=='grip') P.traceRun('#ffd970', [[0.12,0.60],[0.44,0.46],[0.76,0.62]], 0.010, 0.015);
+    },
+    overlay:{ color:'#ffb43a', crown:{count:6,r:0.009,at:0.88,size:0.0026},
+              chevrons:{count:3,size:0.008}, decal:'SOL' }}
+];
 
 
 /* ===== 40_skins.js ===== */
@@ -3469,6 +3677,9 @@ add({
   }
 });
 
+/* melee finishes live in their own file so the knives ship as a set */
+if(typeof KNIFE_SKINS !== 'undefined') KNIFE_SKINS.forEach(add);
+
 /* ---------- index ---------------------------------------------------- */
 const SKIN_BY_ID = {};
 SKINS.forEach(s=> SKIN_BY_ID[s.id]=s);
@@ -3488,10 +3699,10 @@ const CASES = {
     accent:'#4b9fff', sub:'Series 1 · Collection I',
     pool:{
       milspec:['kr47_hexforge','mx4_arcticfox','hornet_cobalt','reaper_frostbite'],
-      restricted:['kr47_tigerclaw','mx4_koi'],
+      restricted:['kr47_tigerclaw','mx4_koi','balisong_marbled'],
       classified:['kr47_neurograph'],
-      covert:['kr47_wraithcoil'],
-      exotic:['kr47_dragonmaw']
+      covert:['kr47_wraithcoil','balisong_doppler'],
+      exotic:['kr47_dragonmaw','balisong_ruination']
     }
   },
   foundry:{
@@ -3499,10 +3710,10 @@ const CASES = {
     accent:'#ff9d2e', sub:'Series 1 · Collection II',
     pool:{
       milspec:['kr47_crimsonrail','mx4_voltline','sidewinder_royal','reaper_ember'],
-      restricted:['mx4_hazmat','reaper_carbon'],
+      restricted:['mx4_hazmat','reaper_carbon','talon_tigertooth'],
       classified:['hornet_swarm'],
-      covert:['hornet_hivemind'],
-      exotic:['hornet_stinger']
+      covert:['hornet_hivemind','talon_gamma'],
+      exotic:['hornet_stinger','talon_solstice']
     }
   },
   nightfall:{
@@ -3513,7 +3724,7 @@ const CASES = {
       restricted:['hornet_glitchwave','hornet_venom','kr47_bloomsplash'],
       classified:['sidewinder_cyberpunk'],
       covert:['mx4_nullpoint'],
-      exotic:['mx4_seraph']
+      exotic:['mx4_seraph','balisong_ruination']
     }
   },
   apex:{
@@ -3524,7 +3735,7 @@ const CASES = {
       restricted:['reaper_skyline','sidewinder_deco'],
       classified:['mx4_prism','reaper_oracle'],
       covert:['reaper_singularity','sidewinder_phantom'],
-      exotic:['reaper_lightlance','sidewinder_kingsransom']
+      exotic:['reaper_lightlance','sidewinder_kingsransom','talon_solstice','balisong_ruination']
     }
   }
 };
@@ -3593,7 +3804,7 @@ const Save = {
   inventory: [],
   keys: { standard: 1, prime: 0 },
   cases: { genesis: 2, foundry: 0, nightfall: 0, apex: 0 },
-  loadout: { kr47:null, mx4:null, hornet:null, reaper:null, sidewinder:null },
+  loadout: { kr47:null, mx4:null, hornet:null, reaper:null, sidewinder:null, balisong:null, talon:null },
   stats: { shots:0, hits:0, headshots:0, opened:0, bestScore:0, unboxed:{} },
   settings: { sens:1.0, fov:82, bloom:true, shadows:true, volume:0.55 }
 };
@@ -3680,7 +3891,7 @@ function loadGame(){
       inventory:Array.isArray(d.inventory)? d.inventory: [],
       keys:Object.assign({standard:0,prime:0}, d.keys||{}),
       cases:Object.assign({genesis:0,foundry:0,nightfall:0,apex:0}, d.cases||{}),
-      loadout:Object.assign({kr47:null,mx4:null,hornet:null,reaper:null,sidewinder:null}, d.loadout||{}),
+      loadout:Object.assign({kr47:null,mx4:null,hornet:null,reaper:null,sidewinder:null,balisong:null,talon:null}, d.loadout||{}),
       stats:Object.assign({shots:0,hits:0,headshots:0,opened:0,bestScore:0,unboxed:{}}, d.stats||{}),
       settings:Object.assign(Save.settings, d.settings||{})
     });
@@ -4134,6 +4345,22 @@ const Scene = {
       this.sparks.push({m:s, v, life:rand(0.22,0.5)*(targetScene?0.5:1), t:0, host});
     }
   },
+  /* The old reload just made the magazine invisible. A mag you watch
+     fall is most of what makes a reload read as a reload. */
+  addDroppedMag(mesh, worldPos, worldQuat){
+    const m = new THREE.Mesh(mesh.geometry, mesh.material);
+    m.position.copy(worldPos);
+    m.quaternion.copy(worldQuat);
+    m.userData.noHit = true;
+    (Player.viewScene||this.scene).add(m);
+    this.casings.push({
+      m, t:0, life:1.4,
+      v: new THREE.Vector3(rand(-0.25,0.05), rand(-0.15,0.1), rand(-0.1,0.25)),
+      spin: new THREE.Vector3(rand(-3,3), rand(-2,2), rand(-4,4)),
+      heavy:true
+    });
+  },
+
   addCasing(pos, color, right, up){
     this._caseMats = this._caseMats || new Map();
     const ck = color||'#c9a227';
@@ -4170,13 +4397,15 @@ const Scene = {
   stepFX(dt){
     for(let i=this.casings.length-1;i>=0;i--){
       const s=this.casings[i]; s.t+=dt;
-      s.v.y -= 3.2*dt;
-      s.m.position.addScaledVector(s.v, dt*0.35);
+      s.v.y -= (s.heavy? 1.9 : 3.2)*dt;
+      s.m.position.addScaledVector(s.v, dt*(s.heavy? 1.0 : 0.35));
       s.m.rotation.x += s.spin.x*dt; s.m.rotation.y += s.spin.y*dt; s.m.rotation.z += s.spin.z*dt;
       if(s.t>=s.life){
         s.m.parent && s.m.parent.remove(s.m);
-        this._casePool = this._casePool || [];
-        if(this._casePool.length < 30) this._casePool.push(s.m);
+        if(!s.heavy){
+          this._casePool = this._casePool || [];
+          if(this._casePool.length < 30) this._casePool.push(s.m);
+        }
         this.casings.splice(i,1);
       }
     }
@@ -4680,13 +4909,72 @@ const Player = {
     const mods = this.gunRoot.userData.mods || {};
     this.inspectStyle = mods.anim || 'standard';
     this.reloadStyle = mods.reloadStyle || 'standard';
+    this.melee = !!this.W.melee;
     this.ammo = this.W.mag;
     this.reserve = this.W.mag*5;
     this.reloading = 0; this.inspecting = 0;
     this.fireCool = 0;
+    this.swingT = 0;
+    /* a balisong comes out of the pocket closed */
+    this.knifeOpen = this.melee && this.W.pivots ? 0 : 1;
+    this.startEquipAnim();
     UI.updateHUD(); UI.updateSkinTag();
   },
   rebuild(){ this.equip(this.weaponId); },
+
+  /* ================================================================
+     DRAW / EQUIP — every weapon gets one, and for a knife it is the
+     whole point of owning the thing.
+     ================================================================ */
+  startEquipAnim(){
+    this.equipLen = this.melee ? (this.W.pivots ? 1.25 : 1.05) : 0.55;
+    this.equipT = this.equipLen;
+  },
+
+  /* ================================================================
+     MELEE — light slash on LMB, heavy stab on RMB. Damage lands on a
+     single frame at the apex of the arc, so the hit reads with the
+     animation instead of ahead of it.
+     ================================================================ */
+  meleeAttack(kind){
+    if(this.swingT>0 || this.equipT>0) return;
+    this.inspecting = 0;
+    this.swingKind = kind;
+    this.swingLen = kind==='stab' ? 0.52 : 0.38;
+    this.swingT = this.swingLen;
+    this.swingHit = false;
+    Audio7.noise(0.13, 0.42, 'bandpass', kind==='stab'? 1500 : 2600, 1.6, 0.12);
+    Audio7.tone(kind==='stab'? 260 : 420, 0.10, 0.16, 'triangle', 140);
+  },
+
+  meleeStrike(){
+    const W = this.W;
+    const dir = new THREE.Vector3(0,0,-1).applyQuaternion(Scene.cam.quaternion);
+    const ray = this._ray || (this._ray = new THREE.Raycaster());
+    ray.set(Scene.cam.position, dir);
+    ray.near = 0.05; ray.far = W.reach || 2.3;
+    Save.stats.shots++;
+    if(Targets.running) Targets.shotsFired++;
+    const hits = ray.intersectObjects(Targets.hitMeshes, false);
+    if(hits.length){
+      const h = hits[0];
+      const res = Targets.hit(h.object, h.point, {dmg: this.swingKind==='stab'? W.stabDmg : W.dmg});
+      if(res){
+        const skin = this.gunRoot.userData.skin;
+        const IM = (skin.vfx && skin.vfx.impact) || {};
+        const n = h.face? h.face.normal.clone() : dir.clone().negate();
+        Audio7.hit(res.head);
+        UI.hitmarker(res.head);
+        UI.popScore(res.points, this.swingKind==='stab'? 'IMPALE' : res.label, res.head);
+        Scene.addSparks(h.point, n, new THREE.Color(IM.color || '#ffd166'), 12);
+        if(IM.burst) Scene.addImpactBurst(h.point, n, IM.color || '#ffd166', IM.scale || 1);
+        Save.credits += Math.round(res.points/20);
+        UI.updateHUD();
+      }
+    } else {
+      Audio7.noise(0.08, 0.14, 'highpass', 3200, 0.8, 0.07);
+    }
+  },
 
   /* ---------- input ------------------------------------------------ */
   bindInput(){
@@ -4698,7 +4986,13 @@ const Player = {
       if(UI.modal) return;
       if(k==='r') this.startReload();
       if(k==='f'||k==='v') this.startInspect();
-      if(k>='1'&&k<='5'){ const w = WEAPON_ORDER[parseInt(k)-1]; if(w) this.equip(w); }
+      if(k>='1'&&k<='7'){ const w = WEAPON_ORDER[parseInt(k)-1]; if(w) this.equip(w); }
+      /* one key to reach for a blade, like every shooter that has them */
+      if(k==='g'){
+        const i = MELEE_ORDER.indexOf(this.weaponId);
+        this.equip(i<0 ? (Save.loadout.balisong || Save.loadout.talon ? MELEE_ORDER[0] : MELEE_ORDER[0])
+                       : MELEE_ORDER[(i+1)%MELEE_ORDER.length]);
+      }
       if(k==='q') this.equip(WEAPON_ORDER[(WEAPON_ORDER.indexOf(this.weaponId)+1)%WEAPON_ORDER.length]);
     });
     document.addEventListener('keyup', e=>{ this.keys[e.key.toLowerCase()]=false; });
@@ -4713,6 +5007,12 @@ const Player = {
     });
     document.addEventListener('mousedown', e=>{
       if(!this.locked) return;
+      if(this.melee){
+        /* a knife has no sights, so the right button is the heavy stab */
+        if(e.button===0) this.meleeAttack('slash');
+        if(e.button===2) this.meleeAttack('stab');
+        return;
+      }
       if(e.button===0) this.firing = true;
       if(e.button===2) this.adsTarget = 1;
     });
@@ -4755,6 +5055,7 @@ const Player = {
 
   /* ---------- actions ---------------------------------------------- */
   startReload(){
+    if(this.melee) return;
     if(this.reloading>0 || this.ammo>=this.W.mag || this.reserve<=0) return;
     this.inspecting = 0;
     this.reloadLen = this.W.reload * (this.reloadStyle==='quick'?0.78: this.reloadStyle==='toss'?1.12:1);
@@ -4763,7 +5064,13 @@ const Player = {
     Audio7.magOut();
   },
   startInspect(){
-    if(this.reloading>0 || this.inspecting>0) return;
+    if(this.reloading>0 || this.inspecting>0 || this.swingT>0) return;
+    if(this.melee){
+      this.inspectLen = this.W.pivots ? 3.2 : 2.6;   /* the balisong routine is longer */
+      this.inspecting = this.inspectLen;
+      Audio7.reloadClick(1400);
+      return;
+    }
     this.inspectLen = this.inspectStyle==='standard'? 2.0 :
                       this.inspectStyle==='spin'? 2.6 :
                       this.inspectStyle==='twirl'? 2.4 : 2.8;
@@ -4772,6 +5079,7 @@ const Player = {
   },
 
   fire(){
+    if(this.melee) return;
     if(this.reloading>0 || this.fireCool>0) return;
     if(this.ammo<=0){ Audio7.dryFire(); this.fireCool=0.22; return; }
     this.inspecting = 0;
@@ -5094,78 +5402,279 @@ const Player = {
     rot.z += Math.sin(this.bob)*0.05*bobK;
     rot.x += Math.abs(Math.cos(this.bob))*0.03*bobK;
 
-    /* --- reload --- */
+    /* ================================================================
+       DRAW — brings any weapon up from below the frame. Cheap, but the
+       absence of it is why swapping used to feel like a teleport.
+       ================================================================ */
+    let equipU = 1;
+    if(this.equipT > 0){
+      this.equipT -= dt;
+      equipU = 1 - clamp(this.equipT/this.equipLen, 0, 1);
+      if(!this.melee){
+        const k = 1 - equipU;
+        p.y   -= k*k*0.30;
+        p.z   += k*0.10;
+        rot.x -= k*0.85;
+        rot.z += k*0.55;
+      }
+      if(this.equipT <= 0){ this.equipT = 0; equipU = 1; }
+    }
+
+    /* ================================================================
+       MELEE
+       A knife only swings, so the equip and the inspect carry it. Both
+       are driven by the real mechanism: the balisong's two handles are
+       separate hinge groups on the tang pin, and the karambit rotates
+       about its finger ring rather than about the wrist.
+       ================================================================ */
+    if(this.melee){
+      const bali = !!W.pivots;
+      const win = (x,a2,b2)=> clamp((x-a2)/(b2-a2),0,1);
+      const ease = x=> x*x*(3-2*x);
+      let open = 1, spin = 0, aRot = 0, bRot = 0;
+
+      /* rotate the whole knife about a point that isn't the wrist */
+      const pivotSpin = (ang, dLocal)=>{
+        const dx = dLocal[2]*sc, dy = dLocal[1]*sc;   /* gun-local -> view */
+        const ca = Math.cos(ang), sa = Math.sin(ang);
+        rot.z += ang;
+        p.x   += dx - (dx*ca - dy*sa);
+        p.y   += dy - (dx*sa + dy*ca);
+      };
+
+      if(this.equipT > 0){
+        const u = equipU;
+        p.y   -= (1-ease(win(u,0,0.22)))*0.34;
+        p.x   += (1-ease(win(u,0,0.30)))*0.07;
+        rot.x -= (1-ease(win(u,0,0.30)))*0.70;
+        if(bali){
+          /* closed, fan open (bite handle leads), aerial roll, settle */
+          const fanA = ease(win(u,0.20,0.46));
+          const fanB = ease(win(u,0.30,0.58));
+          aRot = (1-fanA)*Math.PI;
+          bRot = (1-fanB)*Math.PI;
+          spin = ease(win(u,0.46,0.80))*TAU;
+          open = fanB;
+          if(!this._k1 && u>0.22){ this._k1=1; Audio7.reloadClick(1700); }
+          if(!this._k2 && u>0.58){ this._k2=1; Audio7.reloadClick(1200); }
+          if(!this._k3 && u>0.84){ this._k3=1; Audio7.reloadClick(2100); }
+        } else {
+          spin = ease(win(u,0.18,0.72))*TAU;
+          if(!this._k1 && u>0.20){ this._k1=1; Audio7.reloadClick(1500); }
+        }
+        if(this.equipT<=0) this._k1=this._k2=this._k3=0;
+      }
+      else if(this.swingT > 0){
+        /* a real swing: wind up across the body, snap through, recover */
+        this.swingT -= dt;
+        const u = 1 - clamp(this.swingT/this.swingLen,0,1);
+        if(this.swingKind==='stab'){
+          const push = Math.sin(win(u,0.18,0.55)*Math.PI);
+          p.z   -= push*0.22;
+          p.x   -= push*0.05;
+          rot.x += push*0.30;
+          rot.y -= push*0.22;
+        } else {
+          const wind = ease(win(u,0.00,0.22));
+          const cut  = ease(win(u,0.22,0.55));
+          rot.y += wind*0.75 - cut*1.45;      /* across the body */
+          rot.z += wind*0.55 - cut*1.10;
+          rot.x += wind*0.30 - cut*0.55;
+          p.x   += wind*0.07 - cut*0.16;
+          p.y   += wind*0.04 - cut*0.09;
+        }
+        if(!this.swingHit && u > (this.swingKind==='stab'? 0.36 : 0.34)){
+          this.swingHit = true;
+          this.meleeStrike();
+        }
+        if(this.swingT<=0){ this.swingT=0; this.swingHit=false; }
+      }
+      else if(this.inspecting > 0){
+        this.inspecting -= dt;
+        const u = 1 - clamp(this.inspecting/this.inspectLen,0,1);
+        p.x += -0.045*Math.sin(u*Math.PI);
+        p.z -= 0.055*Math.sin(u*Math.PI);
+        if(bali){
+          /* close, half-fan, full fan, aerial, snap shut, open */
+          const cl   = ease(win(u,0.02,0.14));
+          const fanA = ease(win(u,0.16,0.32));
+          const fanB = ease(win(u,0.34,0.50));
+          const shut = ease(win(u,0.74,0.84));
+          const fin  = ease(win(u,0.86,0.98));
+          aRot = (1-cl)*0 + cl*Math.PI;
+          aRot = aRot*(1-fanA);
+          bRot = cl*Math.PI*(1-fanB);
+          aRot = aRot + shut*Math.PI*(1-fin);
+          bRot = bRot + shut*Math.PI*(1-fin);
+          spin = ease(win(u,0.50,0.74))*TAU + ease(win(u,0.86,1.0))*TAU*0.5;
+          rot.x += Math.sin(u*TAU)*0.18;
+          open = 1-shut+fin;
+          if(!this._k1 && u>0.14){ this._k1=1; Audio7.reloadClick(1800); }
+          if(!this._k2 && u>0.50){ this._k2=1; Audio7.reloadClick(1300); }
+          if(!this._k3 && u>0.84){ this._k3=1; Audio7.reloadClick(2200); }
+          if(!this._k4 && u>0.97){ this._k4=1; Audio7.reloadClick(1600); }
+        } else {
+          /* two finger spins on the ring, then a reverse-grip flip */
+          spin = ease(win(u,0.06,0.52))*TAU*2 + ease(win(u,0.58,0.92))*TAU;
+          rot.x += Math.sin(win(u,0.55,0.95)*Math.PI)*0.55;
+          rot.y += Math.sin(u*TAU)*0.22;
+          if(!this._k1 && u>0.10){ this._k1=1; Audio7.reloadClick(1500); }
+          if(!this._k2 && u>0.60){ this._k2=1; Audio7.reloadClick(1900); }
+        }
+        if(this.inspecting<=0){ this.inspecting=0; this._k1=this._k2=this._k3=this._k4=0; }
+      }
+
+      if(spin) pivotSpin(spin, W.ringPivot || [0,0,0]);
+      if(bali){
+        if(g.handleA) g.handleA.rotation.z = aRot;
+        if(g.handleB) g.handleB.rotation.z = bRot;
+      }
+      this.knifeOpen = open;
+    }
+
+    /* ================================================================
+       RELOAD
+
+       Two rules, both learned the hard way:
+
+       1. ANATOMY. In viewmodel space the weapon points down -Z, so a
+          roll about Z is forearm supination — the wrist has about 180
+          degrees of that, and it is the one axis you can swing hard.
+          Yaw about Y is wrist deviation: barely 30 degrees before the
+          elbow has to swing out. Pitch about X is flexion, about 70.
+          Every pose below stays inside that envelope, which is why the
+          old full-turn tumbles are gone.
+
+       2. READABILITY. A reload you cannot see is a reload that did not
+          happen. The weapon cants its magwell toward the camera and
+          pulls in, the old magazine is released as a real falling
+          object, and the support hand visibly leaves, fetches and
+          seats the new one.
+       ================================================================ */
     if(this.reloading>0){
       this.reloading -= dt;
       const u = 1 - clamp(this.reloading/this.reloadLen,0,1);
       const st = this.reloadStyle;
       const mag = g.mag;
-      const drop = (t)=> {
-        mag.position.y = -t*0.28; mag.position.z = t*0.05;
-        mag.rotation.x = t*0.9; mag.visible = t<0.99;
-      };
-      if(st==='toss'){
-        /* the gun is thrown into a full rotation while the mag swaps */
-        const spin = u<0.7 ? (u/0.7) : 1;
-        rot.x += Math.sin(spin*Math.PI*2)*0.0;
-        rot.z += spin*TAU;
-        p.y -= Math.sin(u*Math.PI)*0.16;
-        p.z -= Math.sin(u*Math.PI)*0.08;
-        if(u<0.35) drop(u/0.35); else if(u<0.55) { mag.visible=false; } else drop(1-(u-0.55)/0.45);
-        if(!this._rs1 && u>0.30){ this._rs1=1; Audio7.magOut(); }
-        if(!this._rs2 && u>0.60){ this._rs2=1; Audio7.magIn(); }
-        if(!this._rs3 && u>0.92){ this._rs3=1; Audio7.bolt(); }
-      } else if(st==='quick'){
-        p.y -= Math.sin(u*Math.PI)*0.10;
-        rot.x += Math.sin(u*Math.PI)*0.55;
-        rot.z += Math.sin(u*Math.PI)*0.30;
-        if(u<0.30) drop(u/0.30); else if(u<0.45) mag.visible=false; else drop(1-(u-0.45)/0.55);
-        if(!this._rs1 && u>0.25){ this._rs1=1; Audio7.magOut(); }
-        if(!this._rs2 && u>0.55){ this._rs2=1; Audio7.magIn(); }
+      const ease = x => x*x*(3-2*x);
+      const win = (x,a2,b2)=> clamp((x-a2)/(b2-a2),0,1);
+
+      /* --- the readability pose: cant the magwell into view --- */
+      const inPose  = ease(win(u, 0.00, 0.16));
+      const outPose = ease(win(u, 0.86, 1.00));
+      const pose = inPose * (1-outPose);
+      const cant = (st==='quick'? 0.62 : 0.78) * pose;
+      rot.z -= cant;                    /* roll magwell toward the camera */
+      rot.x += 0.30 * pose;             /* muzzle up a little */
+      rot.y += 0.16 * pose;
+      p.x   -= 0.055 * pose;            /* bring it in toward centre */
+      p.y   -= 0.045 * pose;
+      p.z   += 0.055 * pose;
+
+      /* --- magazine: out, gone, new one rises and seats --- */
+      const outT = win(u, 0.16, 0.30);
+      const inT  = win(u, 0.52, 0.72);
+      if(u < 0.30){
+        mag.visible = true;
+        mag.position.set(0, -outT*0.10, 0);
+        mag.rotation.x = outT*0.35;
+      } else if(u < 0.52){
+        mag.visible = false;
       } else {
-        p.y -= Math.sin(u*Math.PI)*0.13;
-        p.x += Math.sin(u*Math.PI)*0.03;
-        rot.x += Math.sin(u*Math.PI)*0.42;
-        rot.z += Math.sin(u*Math.PI*0.9)*0.38;
-        if(u<0.32) drop(u/0.32); else if(u<0.50) mag.visible=false; else drop(1-(u-0.50)/0.50);
-        if(!this._rs1 && u>0.28){ this._rs1=1; Audio7.magOut(); }
-        if(!this._rs2 && u>0.62){ this._rs2=1; Audio7.magIn(); }
-        if(!this._rs3 && u>0.90){ this._rs3=1; Audio7.bolt(); }
+        mag.visible = true;
+        const k = 1-inT;
+        mag.position.set(0, -k*0.16, k*0.02);
+        mag.rotation.x = k*0.42;
       }
+
+      /* release the old magazine into the world exactly once */
+      if(!this._rs1 && u > 0.26){
+        this._rs1 = 1;
+        Audio7.magOut();
+        const child = mag.children[0];
+        if(child){
+          mag.updateMatrixWorld(true);
+          const wp = new THREE.Vector3(), wq = new THREE.Quaternion();
+          child.getWorldPosition(wp); child.getWorldQuaternion(wq);
+          Scene.addDroppedMag(child, wp, wq);
+        }
+      }
+      if(!this._rs2 && u > 0.70){ this._rs2 = 1; Audio7.magIn(); }
+
+      /* --- per-style flourish, all inside the wrist's real range --- */
+      if(st === 'toss'){
+        /* a single controlled barrel roll — supination, not a tumble */
+        const r = ease(win(u, 0.30, 0.56)) - ease(win(u, 0.60, 0.86));
+        rot.z -= r * 1.55;
+        p.y   += Math.sin(win(u,0.30,0.86)*Math.PI) * 0.035;
+      } else if(st === 'quick'){
+        rot.x += Math.sin(win(u,0.0,1.0)*Math.PI) * 0.16;
+      } else {
+        rot.z -= Math.sin(win(u,0.20,0.80)*Math.PI) * 0.20;
+      }
+
+      /* --- charging handle / bolt on the way back to ready --- */
+      const boltT = win(u, 0.76, 0.92);
+      if(g.bolt && boltT>0 && boltT<1){
+        g.bolt.position.x = -Math.sin(boltT*Math.PI) * (W.bolt? 0.09 : 0.035);
+      }
+      if(g.slide && boltT>0 && boltT<1){
+        g.slide.position.x = -Math.sin(boltT*Math.PI) * 0.045;
+      }
+      if(!this._rs3 && u > 0.80){ this._rs3 = 1; Audio7.bolt(); }
+
+      this.reloadU = u;
+
       if(this.reloading<=0){
         const need = W.mag - this.ammo;
         const take = Math.min(need, this.reserve);
         this.ammo += take; this.reserve -= take;
         mag.position.set(0,0,0); mag.rotation.set(0,0,0); mag.visible=true;
         this._rs1=this._rs2=this._rs3=0;
+        this.reloadU = 0;
         UI.updateHUD();
       }
-    } else if(this.inspecting>0){
-      /* --- inspect: the showpiece animation, one per skin family --- */
+    } else if(this.inspecting>0 && !this.melee){
+      /* ================================================================
+         INSPECT — the showpiece, but still a human holding an object.
+         Roll is the axis that can move; yaw is the axis that cannot.
+         ================================================================ */
       this.inspecting -= dt;
       const u = 1 - clamp(this.inspecting/this.inspectLen,0,1);
-      const e = Math.sin(clamp(u,0,1)*Math.PI);        /* in/out envelope */
+      const e = Math.sin(clamp(u,0,1)*Math.PI);
       const st = this.inspectStyle;
-      const away = (st==='standard')? 0.06 : 0.16;
-      p.x += -0.055*e; p.y += 0.028*e; p.z -= away*e;
-      rot.y += 0.45*e;
+      const away = (st==='standard')? 0.06 : 0.14;
+      p.x += -0.055*e; p.y += 0.030*e; p.z -= away*e;
+
       if(st==='spin'){
-        rot.z += u*TAU;                                 /* barrel-axis roll */
-        rot.y += Math.sin(u*Math.PI*2)*0.7;
-        rot.x += e*0.25;
+        /* one full barrel roll: the weapon turns inside a loosened grip,
+           which is a thing hands actually do */
+        rot.z += u*TAU;
+        rot.x += e*0.30;
+        rot.y += Math.sin(u*Math.PI)*0.28;
+        p.y   += Math.sin(u*TAU)*0.022;
       } else if(st==='twirl'){
-        rot.y += u*TAU;                                 /* muzzle-over-grip twirl */
-        rot.x += Math.sin(u*TAU)*0.45;
-        p.y += Math.sin(u*TAU)*0.05;
+        /* trigger-guard spin. The wrist barely moves — the weapon
+           rotates around the finger, so the pivot is moved forward to
+           the guard and the translation is compensated out. */
+        const ang = u*TAU;
+        rot.z += ang;
+        const dx = 0.0, dy = 0.045, dz = -0.030;   /* guard, relative to wrist */
+        const ca = Math.cos(ang), sa = Math.sin(ang);
+        p.x += dx - (dx*ca - dy*sa);
+        p.y += dy - (dx*sa + dy*ca);
+        p.z += 0;
+        rot.x += e*0.12;
       } else if(st==='flourish'){
-        rot.y += Math.sin(u*TAU)*1.5;                   /* figure-eight */
-        rot.z += Math.sin(u*TAU*2)*0.8;
-        rot.x += Math.cos(u*TAU)*0.35 - 0.35;
-        p.x += Math.sin(u*TAU*2)*0.05;
+        rot.y += Math.sin(u*TAU)*0.50;            /* was 1.5 — impossible */
+        rot.z += Math.sin(u*TAU*2)*1.15;
+        rot.x += Math.cos(u*TAU)*0.28 - 0.28;
+        p.x   += Math.sin(u*TAU*2)*0.045;
       } else {
-        rot.y += e*1.15;                                /* plain look-over */
-        rot.z += e*0.55;
-        rot.x += Math.sin(u*Math.PI*2)*0.30;
+        /* look it over: roll the left flank in, then the right */
+        rot.z += Math.sin(u*Math.PI)*-1.05;
+        rot.y += e*0.42;
+        rot.x += Math.sin(u*Math.PI*2)*0.26;
       }
       if(this.inspecting<=0) this.inspecting = 0;
     }
@@ -5588,10 +6097,10 @@ const UI = {
   updateHUD(){
     const P = Player, W = P.W, h = this._h;
     if(!W || !h.magn) return;
-    this._set(h.magn,'a',P.ammo);
-    this._set(h.resn,'b',P.reserve);
+    this._set(h.magn,'a', P.melee? '—' : P.ammo);
+    this._set(h.resn,'b', P.melee? '∞' : P.reserve);
     this._set(h.wepname,'c',W.name);
-    this._w(h.magbar,'d',(P.ammo/W.mag*100)+'%');
+    this._w(h.magbar,'d', P.melee? '100%' : (P.ammo/W.mag*100)+'%');
     if(this._prev.sc !== Targets.score){
       this._prev.sc = Targets.score;
       this._set(h.scoren,'e',Targets.score.toLocaleString());
