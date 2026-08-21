@@ -275,6 +275,11 @@ h2 b{color:var(--txt)}
 #clicktoplay .warn{font-size:12px;color:#ffc93c;letter-spacing:.6px;max-width:420px;text-align:center;display:none}
 #clicktoplay.retry .warn{display:block}
 
+.admincmds{display:flex;gap:8px;flex-wrap:wrap}
+.admincmds .btn{flex:0 0 auto;padding:9px 15px}
+.item.admin{cursor:pointer}
+.item.live{outline:2px solid var(--good);outline-offset:-2px}
+
 </style>
 </head>
 <body>
@@ -331,6 +336,7 @@ h2 b{color:var(--txt)}
       <button data-p="inv">Inventory</button>
       <button data-p="load">Loadout</button>
       <button data-p="stats">Stats</button>
+      <button data-p="admin">Admin</button>
     </nav>
     <div id="purse">
       <div><span class="k">Credits</span><span class="v" id="pcred">$3,500</span></div>
@@ -426,6 +432,23 @@ h2 b{color:var(--txt)}
         </div>
         <p style="font-size:11.5px;color:var(--dim);margin-top:12px" id="storenote"></p>
       </div>
+    </div>
+
+    <!-- ================= ADMIN ================= -->
+    <div class="page" id="p-admin">
+      <div class="card" style="margin-bottom:16px">
+        <h2 style="margin-bottom:10px">Sandbox <b>controls</b></h2>
+        <div class="admincmds" id="admincmds"></div>
+        <div class="keys" style="margin-top:14px;grid-template-columns:1fr">
+          <div><span>Wear / float <b id="afloatv">0.03</b></span>
+            <input id="afloat" type="range" min="0" max="0.95" step="0.01" value="0.03" style="width:240px"></div>
+          <div><span>StatTrak™ on spawn</span><input id="ast" type="checkbox"></div>
+        </div>
+        <p style="font-size:11.5px;color:var(--dim);margin-top:10px">
+          Click any skin to build it at the chosen float and equip it instantly — it goes straight to your hands, not your inventory.</p>
+      </div>
+      <div class="filters" id="adminfilters"></div>
+      <div class="items" id="admingrid"></div>
     </div>
   </div>
 </div>
@@ -1985,6 +2008,143 @@ function buildOverlay(root, sub, skin, W, float){
     }
   }
 
+  /* ---- equaliser bars along the receiver flank ---- */
+  if(O.bars){
+    const mat = _emis(col);
+    const n = O.bars.count || 7;
+    const g = new THREE.BoxGeometry(1,1,1); g.userData.shared = true;
+    const arr = [];
+    for(let i=0;i<n;i++){
+      for(const sgn of [1,-1]){
+        const m = new THREE.Mesh(g, mat);
+        const x = bb.x0 + (bb.x1-bb.x0)*(0.24 + (i/(n-1))*0.34);
+        m.position.set(x, midY - 0.004, sgn*0.030);
+        m.scale.set(0.008, 0.016, 0.004);
+        fx.add(m);
+        arr.push({m, p:i*0.6, base:midY-0.004});
+      }
+    }
+    anim.push({kind:'bars', arr});
+  }
+
+  /* ---- a single big halo at the muzzle, plus a counter-rotating inner ---- */
+  if(O.halo){
+    const r = O.halo.r || 0.052;
+    const at = O.halo.at!=null? O.halo.at : 0.90;
+    const x = bb.x0 + (bb.x1-bb.x0)*at;
+    const a = new THREE.Mesh(new THREE.TorusGeometry(r, r*0.045, 6, 30), _emis(col));
+    const b2= new THREE.Mesh(new THREE.TorusGeometry(r*0.66, r*0.030, 6, 24), _emis(col, 0.45));
+    a.position.set(x, midY, 0); a.rotation.y = Math.PI/2;
+    b2.position.set(x - 0.012, midY, 0); b2.rotation.y = Math.PI/2;
+    fx.add(a, b2);
+    anim.push({m:a, kind:'spin', sp:0.5});
+    anim.push({m:b2, kind:'spin', sp:-0.9});
+  }
+
+  /* ---- wireframe containment cage ---- */
+  if(O.lattice){
+    const L = (bb.x1-bb.x0)*(O.lattice.len||0.26);
+    const box = new THREE.BoxGeometry(L, (O.lattice.h||0.075), (O.lattice.d||0.075));
+    const eg = new THREE.EdgesGeometry(box); eg.userData.shared = true;
+    const lm = new THREE.LineBasicMaterial({color:new THREE.Color(col).multiplyScalar(0.75), toneMapped:false});
+    const m = new THREE.LineSegments(eg, lm);
+    m.position.set(bb.x0+(bb.x1-bb.x0)*(O.lattice.at||0.62), midY, 0);
+    fx.add(m);
+    anim.push({m, kind:'breathe', p:0.2});
+    box.dispose();
+  }
+
+  /* ---- floating glyph plates that hover and bob ---- */
+  if(O.runes){
+    const n = O.runes.count || 3;
+    const cv = document.createElement('canvas'); cv.width=cv.height=64;
+    const c = cv.getContext('2d');
+    c.strokeStyle='#fff'; c.lineWidth=5; c.lineCap='round';
+    c.beginPath(); c.moveTo(32,10); c.lineTo(32,54); c.moveTo(14,22); c.lineTo(50,22);
+    c.moveTo(18,44); c.lineTo(46,44); c.stroke();
+    c.beginPath(); c.arc(32,32,22,0,TAU); c.lineWidth=3; c.stroke();
+    const tex = new THREE.CanvasTexture(cv);
+    const mat = new THREE.MeshBasicMaterial({map:tex, color:new THREE.Color(col).multiplyScalar(0.8),
+      transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, toneMapped:false, side:THREE.DoubleSide});
+    const g = new THREE.PlaneGeometry(0.034,0.034); g.userData.shared = true;
+    for(let i=0;i<n;i++){
+      for(const sgn of [1,-1]){
+        const m = new THREE.Mesh(g, mat);
+        m.position.set(bb.x0+(bb.x1-bb.x0)*(0.26+i*0.16), midY+0.030, sgn*0.070);
+        fx.add(m);
+        anim.push({m, kind:'bob', p:i*1.1, y0:midY+0.030});
+      }
+    }
+  }
+
+  /* ---- helix coil wrapped round the barrel ---- */
+  if(O.coils){
+    const turns = O.coils.turns || 5;
+    const len = (bb.x1-bb.x0)*(O.coils.len||0.30);
+    const x0 = bb.x0+(bb.x1-bb.x0)*(O.coils.at||0.60);
+    const r = O.coils.r || 0.026;
+    const pts = [];
+    for(let i=0;i<=turns*10;i++){
+      const t=i/(turns*10), a=t*turns*TAU;
+      pts.push(new THREE.Vector3(x0+len*t, midY+Math.sin(a)*r, Math.cos(a)*r));
+    }
+    const curve = new THREE.CatmullRomCurve3(pts);
+    const m = new THREE.Mesh(new THREE.TubeGeometry(curve, turns*12, r*0.11, 5, false), _emis(col));
+    fx.add(m);
+    anim.push({m, kind:'spinX', sp:1.1, ax:x0, ay:midY});
+  }
+
+  /* ---- stacked chevrons along the top ---- */
+  if(O.chevrons){
+    const n = O.chevrons.count || 4;
+    const sh = new THREE.Shape();
+    const a = O.chevrons.size || 0.020;
+    sh.moveTo(-a,0); sh.lineTo(0,a*0.85); sh.lineTo(a,0); sh.lineTo(a*0.55,0); sh.lineTo(0,a*0.42); sh.lineTo(-a*0.55,0);
+    const g = new THREE.ExtrudeGeometry(sh,{depth:0.004,bevelEnabled:false}); g.userData.shared=true;
+    const mat = _emis(col);
+    for(let i=0;i<n;i++){
+      const m = new THREE.Mesh(g, mat);
+      m.position.set(bb.x0+(bb.x1-bb.x0)*(0.52+i*0.09), bb.y1*0.52, 0.028);
+      fx.add(m);
+      anim.push({m, kind:'chev', p:i*0.45, x0:m.position.x});
+    }
+  }
+
+  /* ---- free-drifting motes, no ring ---- */
+  if(O.motes){
+    const n = O.motes.count || 10;
+    const g = new THREE.SphereGeometry(O.motes.size||0.006, 6, 4); g.userData.shared=true;
+    const mat = _emis(col);
+    for(let i=0;i<n;i++){
+      const m = new THREE.Mesh(g, mat);
+      const hx = bb.x0+(bb.x1-bb.x0)*(0.15+Math.random()*0.7);
+      fx.add(m);
+      anim.push({m, kind:'mote', p:Math.random()*TAU, sp:0.4+Math.random()*0.7,
+                 hx, hy:midY+(Math.random()-0.3)*0.07, hz:(Math.random()-0.5)*0.16,
+                 amp:0.020+Math.random()*0.028});
+    }
+  }
+
+  /* ---- radial crown of spikes round the muzzle ---- */
+  if(O.crown){
+    const n = O.crown.count || 6;
+    const r = O.crown.r || 0.026;
+    const g = new THREE.ConeGeometry((O.crown.size||0.006), (O.crown.size||0.006)*4.5, 5);
+    g.rotateZ(-Math.PI/2); g.userData.shared=true;
+    const mat = _emis(col);
+    const grp = new THREE.Group();
+    for(let i=0;i<n;i++){
+      const m = new THREE.Mesh(g, mat);
+      const a = i/n*TAU;
+      m.position.set(0, Math.sin(a)*r, Math.cos(a)*r);
+      m.rotation.x = -a;
+      grp.add(m);
+    }
+    grp.position.set(bb.x0+(bb.x1-bb.x0)*(O.crown.at||0.93), midY, 0);
+    fx.add(grp);
+    anim.push({m:grp, kind:'spinX2', sp:0.8});
+  }
+
   /* --- LED counter decal on the receiver side --- */
   if(O.decal){
     const cv = document.createElement('canvas'); cv.width=128; cv.height=40;
@@ -2067,6 +2227,34 @@ function tickOverlay(root, t){
       }
     } else if(o.kind==='drift'){
       o.m.rotation.z = o.bx + Math.sin(t*0.8 + o.p)*0.05;
+    } else if(o.kind==='bars'){
+      for(let k=0;k<o.arr.length;k++){
+        const bq=o.arr[k];
+        const hgt = 0.010 + Math.abs(Math.sin(t*1.9 + bq.p))*0.026;
+        bq.m.scale.y = hgt;
+        bq.m.position.y = bq.base + hgt*0.5 - 0.008;
+      }
+    } else if(o.kind==='spin'){
+      o.m.rotation.z = t*o.sp;
+    } else if(o.kind==='spinX'){
+      o.m.rotation.x = t*o.sp;
+    } else if(o.kind==='spinX2'){
+      o.m.rotation.x = t*o.sp;
+      o.m.scale.setScalar(1+Math.sin(t*1.7)*0.07);
+    } else if(o.kind==='breathe'){
+      const k=1+Math.sin(t*1.3+o.p)*0.045; o.m.scale.set(1,k,k);
+    } else if(o.kind==='bob'){
+      o.m.position.y = o.y0 + Math.sin(t*1.2+o.p)*0.012;
+      o.m.rotation.z = Math.sin(t*0.6+o.p)*0.35;
+    } else if(o.kind==='chev'){
+      const k = (Math.sin(t*2.0 - o.p)+1)*0.5;
+      o.m.position.x = o.x0 + k*0.010;
+      o.m.scale.setScalar(0.7+k*0.5);
+    } else if(o.kind==='mote'){
+      const a = t*o.sp + o.p;
+      o.m.position.set(o.hx + Math.sin(a*0.7)*o.amp,
+                       o.hy + Math.sin(a)*o.amp*0.8,
+                       o.hz + Math.cos(a*0.9)*o.amp);
     }
   }
 }
@@ -2313,8 +2501,7 @@ add({
     P.traceOutline('#1ef0cf', 0.055, 0.013);
     P.traceRun('#1ef0cf', [[0.05,0.66],[0.26,0.54],[0.48,0.68],[0.70,0.52],[0.95,0.64]], 0.010, 0.014);
   },
-  overlay:{ color:'#1ef0cf', rings:{count:2}, stars:{at:[0.36,0.68], size:0.026},
-            orbits:{count:2, r:0.044, dots:3, at:[0.16,0.54]}, decal:'NEURO' },
+  overlay:{ color:'#1ef0cf', rings:{count:2}, bars:{count:8}, motes:{count:9,size:0.005}, decal:'NEURO' },
   emissive:'#25f0d0', emissiveKinds:['body','wood','mag'], emissiveIntensity:0.55,
   metalOverride:0.42, roughMul:0.58, envBoost:1.5,
   vfx:{
@@ -2340,9 +2527,7 @@ add({
     P.traceOutline('#a86bff', 0.05, 0.014);
     P.traceRun('#a86bff', [[0.05,0.68],[0.28,0.52],[0.52,0.70],[0.76,0.54],[0.96,0.66]], 0.011, 0.017);
   },
-  overlay:{ color:'#a86bff', rings:{count:3}, stars:{at:[0.32,0.62,0.88], size:0.032},
-            fin:{at:0.38,size:0.05}, spikes:{count:4,size:0.009},
-            orbits:{count:2, r:0.052, dots:4, at:[0.15,0.52]}, decal:'WRAITH' },
+  overlay:{ color:'#a86bff', coils:{turns:6,len:0.26,at:0.58,r:0.024}, motes:{count:11,size:0.006}, decal:'WRAITH' },
   emissive:'#8a4bff', emissiveKinds:['accent'], emissiveIntensity:1.4,
   metalOverride:0.85, roughMul:0.45, envBoost:2.0, baseMetal:'#2a2233',
   vfx:{
@@ -2399,10 +2584,7 @@ add({
     P.traceOutline('#ff6a10', 0.05, 0.015);
     P.traceRun('#ff8a20', [[0.05,0.70],[0.26,0.52],[0.50,0.72],[0.74,0.52],[0.96,0.68]], 0.012, 0.018);
   },
-  overlay:{ color:'#ff6a10', rings:{count:3}, stars:{at:[0.30,0.60,0.88], size:0.034},
-            fin:{at:0.36,size:0.055}, spikes:{count:5,size:0.010},
-            orbits:{count:2, r:0.055, dots:4, at:[0.14,0.50]}, decal:true,
-            shards:{count:4, len:0.17, color:'#ff9a3a', opacity:0.34} },
+  overlay:{ color:'#ff6a10', crown:{count:7,r:0.030,at:0.955,size:0.006}, motes:{count:14,size:0.007}, decal:true },
   metalOverride:0.55, roughMul:0.62, envBoost:1.05, baseMetal:'#5a3a10',
   emissive:'#ff6a10', emissiveKinds:['accent'], emissiveIntensity:0.7, maxFloat:0.55,
   vfx:{
@@ -2517,8 +2699,7 @@ add({
   id:'mx4_prism', name:'Prism', weapon:'mx4', rarity:'classified',
   emissive:'#ffffff', emissiveIntensity:1.25,
   paintEmissive(P){ P.traceOutline('#7de0ff', 0.05, 0.011); },
-  overlay:{ color:'#9ae8ff', rings:{count:3}, stars:{at:[0.30,0.55,0.82], size:0.028},
-            orbits:{count:1, r:0.05, dots:4, at:[0.30]} },
+  overlay:{ color:'#9ae8ff', halo:{r:0.050,at:0.92}, lattice:{at:0.60,len:0.24,h:0.070,d:0.070} },
   metalOverride:0.50, roughMul:0.50, envBoost:1.10, baseMetal:'#8a8f9a',
   vfx:{
     flash:{shape:'shard', core:'#ffffff', corona:'#7de0ff', coronaScale:1.8, light:'#bfe9ff'},
@@ -2542,9 +2723,7 @@ add({
     P.traceOutline('#e07bff', 0.05, 0.014);
     P.traceRun('#e07bff', [[0.06,0.60],[0.30,0.74],[0.56,0.56],[0.84,0.70],[0.97,0.58]], 0.011, 0.017);
   },
-  overlay:{ color:'#c04bff', rings:{count:3}, stars:{at:[0.28,0.58,0.86], size:0.030},
-            fin:{at:0.36,size:0.048}, spikes:{count:4,size:0.009},
-            orbits:{count:2, r:0.05, dots:4, at:[0.16,0.50]}, decal:'NULL' },
+  overlay:{ color:'#c04bff', orbits:{count:2, r:0.052, dots:4, at:[0.16,0.52]}, lattice:{at:0.42,len:0.20,h:0.080,d:0.080}, decal:'NULL' },
   emissive:'#c04bff', emissiveKinds:['accent','mag'], emissiveIntensity:1.1,
   metalOverride:0.5, roughMul:0.5, envBoost:1.8, baseMetal:'#1a1424',
   vfx:{
@@ -2595,10 +2774,7 @@ add({
     P.traceOutline('#ffe9a8', 0.05, 0.014);
     P.traceRun('#fff2c8', [[0.06,0.66],[0.30,0.52],[0.56,0.70],[0.82,0.54],[0.97,0.64]], 0.011, 0.017);
   },
-  overlay:{ color:'#ffe9a8', rings:{count:3}, stars:{at:[0.28,0.58,0.86], size:0.034},
-            fin:{at:0.34,size:0.055}, spikes:{count:4,size:0.009},
-            orbits:{count:2, r:0.052, dots:4, at:[0.16,0.52]}, decal:true,
-            shards:{count:5, len:0.19, color:'#fff4d0', opacity:0.30} },
+  overlay:{ color:'#ffe9a8', halo:{r:0.060,at:0.88}, runes:{count:3}, motes:{count:9,size:0.005}, decal:true },
   metalOverride:0.45, roughMul:0.58, envBoost:1.00, baseMetal:'#b9a06a',
   emissive:'#ffe9a8', emissiveKinds:['accent'], emissiveIntensity:0.85, maxFloat:0.5,
   vfx:{
@@ -2731,7 +2907,7 @@ add({
     P.traceOutline('#ffcf3a', 0.055, 0.012);
     P.traceRun('#ffcf3a', [[0.08,0.60],[0.32,0.72],[0.56,0.56],[0.86,0.68]], 0.010, 0.014);
   },
-  overlay:{ color:'#ffcf3a', rings:{count:2}, stars:{at:[0.40,0.74], size:0.024}, decal:'SWARM' },
+  overlay:{ color:'#ffcf3a', chevrons:{count:5,size:0.018}, rings:{count:1}, decal:'SWARM' },
   metalOverride:0.48, roughMul:0.55, envBoost:1.05, baseMetal:'#7d6a34',
   vfx:{
     flash:{shape:'star', core:'#fff4cf', corona:'#f0cd55', coronaScale:1.8, light:'#ffd970'},
@@ -2754,9 +2930,7 @@ add({
     P.traceOutline('#ffb300', 0.055, 0.013);
     P.traceRun('#ffb300', [[0.08,0.64],[0.34,0.50],[0.60,0.66],[0.90,0.52]], 0.011, 0.016);
   },
-  overlay:{ color:'#ffb300', rings:{count:2}, stars:{at:[0.34,0.66], size:0.028},
-            fin:{at:0.34,size:0.042}, spikes:{count:3,size:0.008},
-            orbits:{count:2, r:0.042, dots:3, at:[0.18,0.56]}, decal:'HIVE' },
+  overlay:{ color:'#ffb300', chevrons:{count:6,size:0.016}, motes:{count:10,size:0.006}, rings:{count:2}, decal:'HIVE' },
   emissive:'#ffb300', emissiveKinds:['accent','mag'], emissiveIntensity:1.3,
   metalOverride:0.75, roughMul:0.4, envBoost:2.0, baseMetal:'#33280d',
   vfx:{
@@ -2816,10 +2990,7 @@ add({
     P.traceOutline('#9dff3d', 0.055, 0.014);
     P.traceRun('#c8ff7a', [[0.08,0.62],[0.34,0.74],[0.62,0.54],[0.92,0.68]], 0.011, 0.017);
   },
-  overlay:{ color:'#9dff3d', rings:{count:2}, stars:{at:[0.34,0.66], size:0.030},
-            fin:{at:0.32,size:0.046}, spikes:{count:4,size:0.009},
-            orbits:{count:2, r:0.044, dots:4, at:[0.18,0.56]}, decal:true,
-            shards:{count:4, len:0.15, color:'#b6ff6a', opacity:0.32} },
+  overlay:{ color:'#9dff3d', coils:{turns:4,len:0.20,at:0.56,r:0.021}, chevrons:{count:4,size:0.015}, decal:true },
   metalOverride:0.50, roughMul:0.55, envBoost:1.15, baseMetal:'#2a3a1a',
   emissive:'#9dff3d', emissiveKinds:['accent'], emissiveIntensity:1.0, maxFloat:0.5,
   vfx:{
@@ -2953,8 +3124,7 @@ add({
     P.traceOutline('#39d7ff', 0.05, 0.012);
     P.traceRun('#39d7ff', [[0.06,0.70],[0.30,0.56],[0.54,0.70],[0.80,0.56],[0.97,0.66]], 0.010, 0.015);
   },
-  overlay:{ color:'#39d7ff', rings:{count:3}, stars:{at:[0.28,0.60,0.88], size:0.030},
-            fin:{at:0.40,size:0.045}, orbits:{count:2, r:0.05, dots:3, at:[0.14,0.50]} },
+  overlay:{ color:'#39d7ff', runes:{count:3}, rings:{count:2}, stars:{at:[0.62], size:0.028} },
   emissive:'#39d7ff', emissiveKinds:['body','accent'], emissiveIntensity:0.6,
   metalOverride:0.6, roughMul:0.4, envBoost:2.0, baseMetal:'#1b2833',
   vfx:{
@@ -2990,9 +3160,7 @@ add({
     P.traceOutline('#8ed6ff', 0.05, 0.014);
     P.traceRun('#8ed6ff', [[0.05,0.70],[0.28,0.54],[0.52,0.72],[0.78,0.54],[0.97,0.68]], 0.011, 0.018);
   },
-  overlay:{ color:'#4aa8ff', rings:{count:3}, stars:{at:[0.26,0.58,0.88], size:0.034},
-            fin:{at:0.38,size:0.052}, spikes:{count:4,size:0.010},
-            orbits:{count:2, r:0.055, dots:4, at:[0.13,0.50]}, decal:'EVENT-H' },
+  overlay:{ color:'#4aa8ff', orbits:{count:2, r:0.058, dots:5, at:[0.13,0.50]}, halo:{r:0.046,at:0.90}, decal:'EVENT-H' },
   emissive:'#4aa8ff', emissiveKinds:['accent'], emissiveIntensity:1.2,
   metalOverride:0.9, roughMul:0.3, envBoost:2.4, baseMetal:'#141820',
   vfx:{
@@ -3053,10 +3221,7 @@ add({
     P.traceOutline('#7fd4ff', 0.05, 0.015);
     P.traceRun('#cfefff', [[0.05,0.70],[0.30,0.54],[0.55,0.72],[0.80,0.54],[0.97,0.66]], 0.012, 0.018);
   },
-  overlay:{ color:'#7fd4ff', rings:{count:4}, stars:{at:[0.26,0.56,0.86], size:0.036},
-            fin:{at:0.36,size:0.058}, spikes:{count:5,size:0.010},
-            orbits:{count:2, r:0.058, dots:5, at:[0.13,0.48]}, decal:true,
-            shards:{count:6, len:0.21, color:'#d8f4ff', opacity:0.30} },
+  overlay:{ color:'#7fd4ff', lattice:{at:0.72,len:0.30,h:0.062,d:0.062}, halo:{r:0.040,at:0.97}, bars:{count:9}, decal:true },
   metalOverride:0.42, roughMul:0.55, envBoost:0.95, baseMetal:'#c8d8e8',
   emissive:'#e8faff', emissiveKinds:['accent'], emissiveIntensity:1.2, maxFloat:0.45,
   vfx:{
@@ -3171,8 +3336,7 @@ add({
     P.traceOutline('#00e5ff', 0.06, 0.014);
     P.traceRun('#ff2fb0', [[0.10,0.66],[0.40,0.52],[0.70,0.68],[0.94,0.56]], 0.011, 0.016);
   },
-  overlay:{ color:'#00e5ff', rings:{count:1}, stars:{at:[0.55,0.88], size:0.022},
-            orbits:{count:1, r:0.038, dots:3, at:[0.34]}, decal:'CY-01' },
+  overlay:{ color:'#00e5ff', bars:{count:5}, chevrons:{count:3,size:0.013}, decal:'CY-01' },
   emissive:'#ff2fb0', emissiveKinds:['body','accent'], emissiveIntensity:0.75,
   metalOverride:0.7, roughMul:0.32, envBoost:2.2, baseMetal:'#20182a',
   vfx:{
@@ -3199,8 +3363,7 @@ add({
     P.traceOutline('#7ef9ff', 0.06, 0.015);
     P.traceRun('#7ef9ff', [[0.10,0.64],[0.42,0.50],[0.72,0.66],[0.95,0.54]], 0.012, 0.017);
   },
-  overlay:{ color:'#7ef9ff', rings:{count:1}, stars:{at:[0.52,0.86], size:0.024},
-            orbits:{count:2, r:0.038, dots:3, at:[0.28,0.62]}, decal:'PH-9' },
+  overlay:{ color:'#7ef9ff', motes:{count:12,size:0.005}, halo:{r:0.030,at:0.95}, decal:'PH-9' },
   emissive:'#7ef9ff', emissiveKinds:['accent','mag','body'], emissiveIntensity:0.9,
   metalOverride:0.4, roughMul:0.25, envBoost:2.6, baseMetal:'#1c2a30',
   vfx:{
@@ -3255,9 +3418,7 @@ add({
     P.traceOutline('#ffd970', 0.06, 0.015);
     P.traceRun('#fff0b8', [[0.10,0.64],[0.40,0.50],[0.70,0.66],[0.95,0.54]], 0.012, 0.017);
   },
-  overlay:{ color:'#ffd970', rings:{count:2}, stars:{at:[0.50,0.86], size:0.026},
-            orbits:{count:2, r:0.040, dots:4, at:[0.26,0.62]}, decal:true,
-            shards:{count:3, len:0.11, color:'#ffe9a8', opacity:0.32} },
+  overlay:{ color:'#ffd970', crown:{count:8,r:0.020,at:0.97,size:0.005}, runes:{count:2}, decal:true },
   metalOverride:0.45, roughMul:0.58, envBoost:0.95, baseMetal:'#8a6d1e',
   emissive:'#ffd970', emissiveKinds:[], emissiveIntensity:0.4, maxFloat:0.45,
   vfx:{
@@ -4501,7 +4662,10 @@ const Player = {
     if(!WEAPONS[id]) return;
     this.weaponId = id;
     this.W = WEAPONS[id];
-    this.currentItem = loadoutInstance(id);
+    /* admin panel hands us a one-off instance that never enters the save */
+    this.currentItem = (this.adminItem && this.adminItem.weapon===id)
+      ? this.adminItem : loadoutInstance(id);
+    if(this.adminItem && this.adminItem.weapon!==id) this.adminItem = null;
     if(this.gunRoot){ this.gunHolder.remove(this.gunRoot); disposeTree(this.gunRoot); }
     this.gunRoot = buildWeaponModel(id, this.currentItem);
     this.gunRoot.rotation.y = Math.PI/2;
@@ -4627,9 +4791,11 @@ const Player = {
     this.kickX += (Math.random()-0.5)*W.recoil[1]*2*adsK;
     this.punch = 1;
     this.camShake = Math.min(1, this.camShake + 0.35*adsK);
-    this.recoilV.z += 0.030*adsK*(W.dmg/40);
-    this.recoilR.x -= 0.30*adsK*(W.dmg/45);
-    this.recoilR.z += (Math.random()-0.5)*0.20;
+    this.recoilV.z += 0.034*adsK*(W.dmg/40);   /* kick straight back */
+    /* Rotating the recoil group about +X lifts the muzzle. This was
+       negative, so every shot drove the barrel into the floor. */
+    this.recoilR.x += 0.20*adsK*(W.dmg/45);
+    this.recoilR.z += (Math.random()-0.5)*0.16;
     this.spreadHeat = Math.min(1, this.spreadHeat + 0.20);
 
     /* ---- muzzle flash -------------------------------------------------
@@ -4719,7 +4885,14 @@ const Player = {
         Audio7.noise(0.10,0.22,'bandpass',900,1.4,0.09);
       }
     }
-    this.addTracer(mz, endPoint, V.tracer || {});
+    /* mz is in VIEWMODEL space (camera at origin); endPoint is a world
+       hit. The tracer lives in the world scene, so the muzzle has to be
+       lifted into world space first — otherwise every tracer was drawn
+       back at the world origin, which is why they were never visible. */
+    const mzWorld = mz.clone()
+      .applyQuaternion(Scene.cam.quaternion)
+      .add(Scene.cam.position);
+    this.addTracer(mzWorld, endPoint, V.tracer || {});
     UI.updateHUD();
     if(this.ammo===0) setTimeout(()=>this.startReload(), 220);
   },
@@ -4728,9 +4901,10 @@ const Player = {
      so every style tapers its alpha toward the camera. */
   addTracer(from, to, T){
     const style = T.style || 'bullet';
-    const color = new THREE.Color(T.color || '#ffd9a0');
+    const color = new THREE.Color(T.color || '#ffd08a');
     const dist = from.distanceTo(to);
-    const w = (T.width || 1) * (style==='beam'? 0.020 : style==='void'? 0.016 : 0.010);
+    /* these were ~2 cm across and gone in 6 frames — invisible past 20 m */
+    const w = (T.width || 1) * (style==='beam'? 0.019 : style==='void'? 0.016 : 0.013);
     /* Unit-length tracer geometry, scaled per shot. Building a fresh
        CylinderGeometry for every bullet was allocating three typed
        arrays and a draw-range at up to 15 shots a second. */
@@ -4738,7 +4912,7 @@ const Player = {
       Player._tracerGeo = {};
       [6,8].forEach(seg=>{
         const g = new THREE.CylinderGeometry(1, 0.35, 1, seg, 1, true);
-        g.rotateX(Math.PI/2); g.translate(0,0,-0.5);
+        g.rotateX(Math.PI/2); g.translate(0,0,0.5);   /* span 0..+1 toward the target */
         Player._tracerGeo[seg] = g;
       });
       Player._tracerPool = [];
@@ -4761,16 +4935,23 @@ const Player = {
       Scene.scene.add(m);
       return m;
     };
-    const life = style==='beam'? 0.16 : style==='holy'? 0.14 : 0.10;
+    const life = style==='beam'? 0.22 : style==='holy'? 0.20 : 0.17;
+    /* every style now gets a soft outer shell so the round reads as a
+       streak of light rather than a hairline */
+    this.tracers.push({m:mk(w*2.4, w*0.8, 8, color, 0.26, true), t:0, life:life*1.25, style:'bullet'});
     if(style==='holy'){
-      this.tracers.push({m:mk(w*2.6,w*0.9,8,color,0.22,true), t:0, life:life*1.3, style:'bullet'});
-      this.tracers.push({m:mk(w,w*0.35,6,new THREE.Color('#ffffff'),0.9,true), t:0, life, style});
+      this.tracers.push({m:mk(w, w*0.40, 8, new THREE.Color('#ffffff'), 1.0, true), t:0, life, style});
     } else if(style==='void'){
-      this.tracers.push({m:mk(w,w*0.35,6,color,0.85,true), t:0, life, style});
-      this.tracers.push({m:mk(w*0.45,w*0.14,6,new THREE.Color(0x000000),0.85,false), t:0, life, style:'bullet'});
+      this.tracers.push({m:mk(w, w*0.40, 8, color, 1.0, true), t:0, life, style});
+      this.tracers.push({m:mk(w*0.42, w*0.14, 6, new THREE.Color(0x000000), 0.9, false), t:0, life, style:'bullet'});
     } else {
-      this.tracers.push({m:mk(w,w*0.35,style==='beam'?8:6,color,0.85,true), t:0, life, style});
+      this.tracers.push({m:mk(w, w*0.40, style==='beam'?8:6, color, 1.0, true), t:0, life, style});
     }
+    /* a bright head where the round lands */
+    const head = mk(w*3.0, w*3.0, 6, color, 0.60, true);
+    head.position.copy(to);
+    head.scale.set(w*3.0, w*3.0, w*4);
+    this.tracers.push({m:head, t:0, life:life*0.6, style:'head'});
     if(style==='ember'){
       const d = to.clone().sub(from);
       for(let i=0;i<4;i++){
@@ -4856,7 +5037,7 @@ const Player = {
     for(let i=this.tracers.length-1;i>=0;i--){
       const t=this.tracers[i]; t.t+=dt;
       const kk = 1-t.t/t.life;
-      t.m.material.opacity = 0.9*kk*kk;
+      t.m.material.opacity = (t.style==='head'? 0.7 : 1.0)*kk*kk;
       const gw = t.m.userData.w0 || (t.m.userData.w0 = t.m.scale.x);
       const grow = gw * (1 + t.t*(t.style==='beam'? 3 : 6));
       t.m.scale.x = t.m.scale.y = grow;
@@ -4991,7 +5172,7 @@ const Player = {
 
     /* --- recoil springs --- */
     this.recoilV.multiplyScalar(Math.pow(0.0002, dt));
-    this.recoilR.multiplyScalar(Math.pow(0.0004, dt));
+    this.recoilR.multiplyScalar(Math.pow(0.00002, dt));
     this.recoil.position.set(0,0,0).add(this.recoilV);
     this.recoil.rotation.set(this.recoilR.x, this.recoilR.y, this.recoilR.z);
 
@@ -5504,6 +5685,7 @@ const UI = {
     if(this.page==='inv') this.renderInventory();
     if(this.page==='load') this.renderLoadout();
     if(this.page==='stats') this.renderStats();
+    if(this.page==='admin') this.renderAdmin();
     this.updateHUD();
   },
 
@@ -5753,6 +5935,90 @@ const UI = {
     $('#volv').textContent = Math.round(Save.settings.volume*100);
     $('#sens').value = Save.settings.sens; $('#fov').value = Save.settings.fov;
     $('#vol').value = Save.settings.volume; $('#bloom').checked = Save.settings.bloom;
+  },
+
+  /* ------------------------------------------------------------------
+     ADMIN — every weapon and every skin, one click away. Equips a
+     freshly-built instance without touching the save inventory, so you
+     can flip through all 49 while looking at them in the range.
+  ------------------------------------------------------------------ */
+  adminFilter:'all', adminFloat:0.03, adminST:false, adminLive:null,
+
+  renderAdmin(){
+    const cmds = $('#admincmds');
+    if(!cmds.dataset.built){
+      cmds.dataset.built='1';
+      const mk=(label,fn,cls)=>{ const b=el('button','btn'+(cls?' '+cls:''),label); b.onclick=fn; cmds.appendChild(b); };
+      mk('+ $100,000', ()=>{ Save.credits+=100000; saveGame(); this.refresh(); this.toast('+$100,000','#3ddc84'); },'primary');
+      mk('+10 of every case', ()=>{ CASE_ORDER.forEach(c=>Save.cases[c]+=10); saveGame(); this.refresh(); this.toast('Cases added','#4ea8ff'); });
+      mk('+10 of every key', ()=>{ Object.keys(KEYS).forEach(k=>Save.keys[k]=(Save.keys[k]||0)+10); saveGame(); this.refresh(); this.toast('Keys added','#ffc93c'); });
+      mk('Grant all 49 skins', ()=>{
+        SKINS.forEach(sk=>{ if(!Save.inventory.some(i=>i.skinId===sk.id))
+          Save.inventory.push(makeItem(sk.id,{float:this.adminFloat, st:this.adminST})); });
+        saveGame(); this.refresh(); this.toast('Full collection granted','#ffd700');
+      },'gold');
+      mk('Level 30', ()=>{ Save.level=30; Save.xp=0; saveGame(); this.refresh(); },'');
+      mk('Refill ammo', ()=>{ Player.ammo=Player.W.mag; Player.reserve=Player.W.mag*5; UI.updateHUD(); });
+      mk('Clear inventory', ()=>{ Save.inventory=[]; for(const w in Save.loadout) Save.loadout[w]=null;
+        Player.equip(Player.weaponId); saveGame(); this.refresh(); });
+      $('#afloat').oninput = e=>{
+        this.adminFloat = parseFloat(e.target.value);
+        $('#afloatv').textContent = this.adminFloat.toFixed(2)+'  ('+wearOf(this.adminFloat).abbr+')';
+        if(this.adminLive) this.spawnAdmin(this.adminLive);
+      };
+      $('#ast').onchange = e=>{ this.adminST = e.target.checked; if(this.adminLive) this.spawnAdmin(this.adminLive); };
+    }
+
+    const f = $('#adminfilters');
+    if(!f.dataset.built){
+      f.dataset.built='1';
+      const opts=[['all','All 49']].concat(WEAPON_ORDER.map(w=>[w,WEAPONS[w].name]))
+        .concat(RARITY_ORDER.map(r=>[r,RARITY[r].name]));
+      f.innerHTML = opts.map(([k,v])=>`<button class="chip${k==='all'?' on':''}" data-f="${k}">${v}</button>`).join('');
+      $$('#adminfilters .chip').forEach(b=> b.onclick=()=>{
+        this.adminFilter=b.dataset.f;
+        $$('#adminfilters .chip').forEach(x=>x.classList.toggle('on',x===b));
+        this.renderAdmin();
+      });
+    }
+
+    const grid = $('#admingrid'); grid.innerHTML='';
+    let list = SKINS.filter(sk=> this.adminFilter==='all'
+      || sk.weapon===this.adminFilter || sk.rarity===this.adminFilter);
+    list.sort((a,b)=> WEAPON_ORDER.indexOf(a.weapon)-WEAPON_ORDER.indexOf(b.weapon)
+      || RARITY_ORDER.indexOf(a.rarity)-RARITY_ORDER.indexOf(b.rarity));
+    list.forEach(sk=>{
+      const r = RARITY[sk.rarity];
+      const card = el('div','item admin'+(this.adminLive===sk.id?' live':''));
+      card.innerHTML = `<div class="rar" style="background:${r.color}"></div>
+        <div class="pic"></div>
+        <div class="info">
+          <div class="w">${WEAPONS[sk.weapon].name}</div>
+          <div class="n" style="color:${r.color}">${sk.name}</div>
+          <div class="meta"><span>${r.short}</span>
+            <span style="color:var(--dim);font-size:10px">${sk.overlay?'VFX':''}${sk.mods?' · MOD':''}</span></div>
+        </div>`;
+      card.querySelector('.pic').appendChild(
+        lazyIcon({skinId:sk.id, weapon:sk.weapon, float:this.adminFloat, st:false}, 264, 172));
+      card.onclick = ()=> this.spawnAdmin(sk.id);
+      grid.appendChild(card);
+    });
+  },
+
+  /* build the skin straight into the player's hands, bypassing the save */
+  spawnAdmin(skinId){
+    const sk = SKIN_BY_ID[skinId];
+    if(!sk) return;
+    this.adminLive = skinId;
+    const inst = makeItem(skinId, {float:this.adminFloat, st:this.adminST});
+    inst.uid = '__admin_'+skinId;
+    Player.weaponId = sk.weapon;
+    Player.W = WEAPONS[sk.weapon];
+    Player.adminItem = inst;
+    Player.equip(sk.weapon);
+    Audio7.ui();
+    this.renderAdmin();
+    this.toast('Equipped · '+WEAPONS[sk.weapon].name+' | '+sk.name, RARITY[sk.rarity].color);
   },
 
   /* ---------- results ------------------------------------------------ */
